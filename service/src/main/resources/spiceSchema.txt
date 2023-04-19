@@ -1,0 +1,81 @@
+definition user {}
+
+/* TODO: permissions on the group - who can add member, remove member */
+definition group {
+  relation admin: proxy_group#membership | group#membership
+  relation member: proxy_group#membership | group#membership
+
+  permission membership = member + admin
+}
+
+definition proxy_group {
+  relation primary: user
+  relation petsa: user
+
+  permission membership = primary + petsa
+}
+
+definition workspace {
+  /* workspace roles */
+  relation owner: proxy_group#membership | group#membership
+  relation writer: proxy_group#membership | group#membership
+  relation reader: proxy_group#membership | group#membership
+  relation discoverer: proxy_group#membership | group#membership
+  relation application: proxy_group#membership
+  relation auth_domain: group#membership
+  relation manager: proxy_group#membership
+
+  /* workspace actions */
+  permission discover = (owner + writer + application + reader + discoverer) & auth_domain
+  permission read  = (owner + writer + application + reader) & auth_domain
+  permission write = (owner + writer + application) & auth_domain
+  permission edit  = (owner + writer) & auth_domain
+  permission own   = owner & auth_domain
+
+    /* Future: these could be collapsed into the user and application cases */
+  permission create_controlled_user_private = (owner + writer + application) & auth_domain
+  permission create_controlled_user_shared  = (owner + writer + application) & auth_domain
+  permission create_controlled_application_private = application
+  permission create_controlled_application_shared  = application
+
+    /* Future: these could be collapsed into a single permission */
+  permission create_referenced_resource = (owner + writer + application) & auth_domain
+  permission delete_referenced_resource = (owner + writer + application) & auth_domain
+  permission update_referenced_resource = (owner + writer + application) & auth_domain
+
+  permission delete = owner & auth_domain
+
+
+  permission share_policy_owner = manager + (owner & auth_domain)
+  permission share_policy_writer = manager + (owner & auth_domain)
+  permission share_policy_reader = manager + (owner & auth_domain)
+  permission share_policy_discoverer = manager + (owner & auth_domain)
+  permission read_policy_owner = manager + ((owner + writer + reader) & auth_domain)
+  permission read_policies = manager + (owner & auth_domain)
+}
+
+definition controlled_user_shared_resource {
+  relation parent_workspace: workspace
+
+  /* No new roles on user shared: map to workspace permissions */
+  permission read = parent_workspace->read
+  permission write = parent_workspace->write
+  permission edit = parent_workspace->write
+  permission delete = parent_workspace->write
+  permission read_policies = parent_workspace->owner
+  permission share_policies = parent_workspace->owner
+}
+
+definition controlled_user_private_resource {
+  relation parent_workspace: workspace
+
+  /* There should only be one related user, represented as a proxy group */
+  relation editor: proxy_group#membership
+
+  /* assigned editor AND have write permission on the workspace */
+  permission read = editor & parent_workspace->write
+  permission write = editor & parent_workspace->write
+  permission edit = editor & parent_workspace->write
+  permission delete = editor + parent_workspace->delete
+  permission read_policies = parent_workspace->read_policies
+}

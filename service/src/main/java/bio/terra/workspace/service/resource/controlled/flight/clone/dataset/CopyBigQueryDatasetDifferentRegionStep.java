@@ -90,7 +90,7 @@ public class CopyBigQueryDatasetDifferentRegionStep implements Step {
               () ->
                   samService.getOrCreatePetSaEmail(
                       gcpCloudContextService.getRequiredGcpProject(destinationWorkspaceId),
-                      userRequest.getRequiredToken()),
+                      userRequest),
               "CopyBigQueryDatasetDifferentRegionStep");
 
       TransferConfig config =

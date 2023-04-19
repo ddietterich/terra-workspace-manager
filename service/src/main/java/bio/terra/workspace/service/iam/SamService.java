@@ -7,15 +7,13 @@ import bio.terra.common.sam.SamRetry;
 import bio.terra.common.sam.exception.SamExceptionFactory;
 import bio.terra.common.tracing.OkHttpClientTracingInterceptor;
 import bio.terra.workspace.app.configuration.external.SamConfiguration;
-import bio.terra.workspace.common.exception.InternalLogicException;
-import bio.terra.workspace.common.utils.GcpUtils;
 import bio.terra.workspace.db.WorkspaceDao;
 import bio.terra.workspace.service.iam.model.ControlledResourceIamRole;
 import bio.terra.workspace.service.iam.model.RoleBinding;
-import bio.terra.workspace.service.iam.model.SamConstants;
 import bio.terra.workspace.service.iam.model.WsmIamRole;
+import bio.terra.workspace.service.notsam.NotSamService;
+import bio.terra.workspace.service.notsam.UserManager;
 import bio.terra.workspace.service.resource.controlled.model.ControlledResource;
-import bio.terra.workspace.service.resource.controlled.model.ControlledResourceCategory;
 import bio.terra.workspace.service.workspace.model.Workspace;
 import bio.terra.workspace.service.workspace.model.WorkspaceDescription;
 import com.google.auth.oauth2.GoogleCredentials;
@@ -25,10 +23,10 @@ import com.google.common.collect.ImmutableSet;
 import io.opencensus.contrib.spring.aop.Traced;
 import io.opencensus.trace.Tracing;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -43,14 +41,10 @@ import org.broadinstitute.dsde.workbench.client.sam.api.GoogleApi;
 import org.broadinstitute.dsde.workbench.client.sam.api.ResourcesApi;
 import org.broadinstitute.dsde.workbench.client.sam.api.StatusApi;
 import org.broadinstitute.dsde.workbench.client.sam.api.UsersApi;
-import org.broadinstitute.dsde.workbench.client.sam.model.AccessPolicyMembershipV2;
 import org.broadinstitute.dsde.workbench.client.sam.model.AccessPolicyResponseEntryV2;
-import org.broadinstitute.dsde.workbench.client.sam.model.CreateResourceRequestV2;
-import org.broadinstitute.dsde.workbench.client.sam.model.FullyQualifiedResourceId;
 import org.broadinstitute.dsde.workbench.client.sam.model.GetOrCreatePetManagedIdentityRequest;
 import org.broadinstitute.dsde.workbench.client.sam.model.SystemStatus;
 import org.broadinstitute.dsde.workbench.client.sam.model.UserIdInfo;
-import org.broadinstitute.dsde.workbench.client.sam.model.UserResourcesResponse;
 import org.broadinstitute.dsde.workbench.client.sam.model.UserStatusInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -78,10 +72,16 @@ public class SamService {
   private final OkHttpClient commonHttpClient;
 
   private final WorkspaceDao workspaceDao;
+  private final NotSamService notSamService;
+  private final UserManager userManager;
   private boolean wsmServiceAccountInitialized;
 
   @Autowired
-  public SamService(SamConfiguration samConfig, WorkspaceDao workspaceDao) {
+  public SamService(
+      SamConfiguration samConfig,
+      WorkspaceDao workspaceDao,
+      NotSamService notSamService,
+      UserManager userManager) {
     this.samConfig = samConfig;
     this.wsmServiceAccountInitialized = false;
     this.commonHttpClient =
@@ -91,6 +91,8 @@ public class SamService {
             .addInterceptor(new OkHttpClientTracingInterceptor(Tracing.getTracer()))
             .build();
     this.workspaceDao = workspaceDao;
+    this.notSamService = notSamService;
+    this.userManager = userManager;
   }
 
   private ApiClient getApiClient(String accessToken) {
@@ -220,32 +222,6 @@ public class SamService {
     }
   }
 
-  /**
-   * Register WSM's service account as a user in Sam if it isn't already. This should only need to
-   * register with Sam once per environment, so it is implemented lazily.
-   */
-  private void initializeWsmServiceAccount() throws InterruptedException {
-    if (!wsmServiceAccountInitialized) {
-      final String wsmAccessToken;
-      try {
-        wsmAccessToken = getWsmServiceAccountToken();
-      } catch (InternalServerErrorException e) {
-        // In cases where WSM is not running as a service account (e.g. unit tests), the above call
-        // will throw. This can be ignored now and later when the credentials are used again.
-        logger.warn(
-            "Failed to register WSM service account in Sam. This is expected for tests.", e);
-        return;
-      }
-      UsersApi usersApi = samUsersApi(wsmAccessToken);
-      // If registering the service account fails, all we can do is to keep trying.
-      if (!wsmServiceAccountRegistered(usersApi)) {
-        // retries internally
-        registerWsmServiceAccount(usersApi);
-      }
-      wsmServiceAccountInitialized = true;
-    }
-  }
-
   @VisibleForTesting
   public boolean wsmServiceAccountRegistered(UsersApi usersApi) throws InterruptedException {
     try {
@@ -266,15 +242,6 @@ public class SamService {
     }
   }
 
-  private void registerWsmServiceAccount(UsersApi usersApi) throws InterruptedException {
-    try {
-      SamRetry.retry(() -> usersApi.createUserV2(""));
-    } catch (ApiException apiException) {
-      throw SamExceptionFactory.create(
-          "Error registering WSM service account with Sam", apiException);
-    }
-  }
-
   /**
    * Wrapper around the Sam client to create a workspace resource in Sam.
    *
@@ -286,30 +253,8 @@ public class SamService {
   public void createWorkspaceWithDefaults(
       AuthenticatedUserRequest userRequest, UUID uuid, List<String> authDomainList)
       throws InterruptedException {
-    ResourcesApi resourceApi = samResourcesApi(userRequest.getRequiredToken());
-    // Sam will throw an error if no owner is specified, so the caller's email is required. It can
-    // be looked up using the auth token if that's all the caller provides.
 
-    // If we called WSM as the pet SA and went through the proxy, this becomes the pet SA's email if
-    // we use the request email. That caused an issue where the human user wasn't recognized on the
-    // workspace.
-
-    String humanUserEmail = getUserEmailFromSam(userRequest);
-
-    CreateResourceRequestV2 workspaceRequest =
-        new CreateResourceRequestV2()
-            .resourceId(uuid.toString())
-            .policies(defaultWorkspacePolicies(humanUserEmail))
-            .authDomain(authDomainList);
-    try {
-      SamRetry.retry(
-          () -> resourceApi.createResourceV2(SamConstants.SamResource.WORKSPACE, workspaceRequest));
-      logger.info("Created Sam resource for workspace {}", uuid);
-    } catch (ApiException apiException) {
-      throw SamExceptionFactory.create("Error creating a Workspace resource in Sam", apiException);
-    }
-    dumpRoleBindings(
-        SamConstants.SamResource.WORKSPACE, uuid.toString(), userRequest.getRequiredToken());
+    notSamService.createWorkspaceAuthz(userRequest, uuid, authDomainList);
   }
 
   /**
@@ -325,81 +270,41 @@ public class SamService {
   public Map<UUID, WorkspaceDescription> listWorkspaceIdsAndHighestRoles(
       AuthenticatedUserRequest userRequest, WsmIamRole minimumHighestRoleFromRequest)
       throws InterruptedException {
-    ResourcesApi resourceApi = samResourcesApi(userRequest.getRequiredToken());
     Map<UUID, WorkspaceDescription> result = new HashMap<>();
-    try {
-      List<UserResourcesResponse> userResourcesResponses =
-          SamRetry.retry(
-              () -> resourceApi.listResourcesAndPoliciesV2(SamConstants.SamResource.WORKSPACE));
-      for (var userResourcesResponse : userResourcesResponses) {
-        try {
 
-          UUID workspaceId = UUID.fromString(userResourcesResponse.getResourceId());
-          Optional<Workspace> workspaceOptional = workspaceDao.getWorkspaceIfExists(workspaceId);
-          if (workspaceOptional.isEmpty()) {
-            continue;
-          }
-          List<WsmIamRole> roles =
-              userResourcesResponse.getDirect().getRoles().stream()
-                  .map(WsmIamRole::fromSam)
-                  .filter(Objects::nonNull)
-                  .collect(Collectors.toList());
+    List<NotSamService.WorkspaceAndRole> workspaceAndRoleList =
+        notSamService.listWorkspacesAndRole(userRequest, minimumHighestRoleFromRequest);
 
-          // Skip workspaces with no roles. (That means there's a role this WSM doesn't know
-          // about.)
-          WsmIamRole.getHighestRole(workspaceId, roles)
-              .ifPresent(
-                  highestRole -> {
-                    if (minimumHighestRoleFromRequest.roleAtLeastAsHighAs(highestRole)) {
-                      result.put(
-                          workspaceId,
-                          new WorkspaceDescription(
-                              workspaceOptional.get(),
-                              highestRole,
-                              ImmutableList.copyOf(
-                                  userResourcesResponse.getMissingAuthDomainGroups())));
-                    }
-                  });
-        } catch (IllegalArgumentException e) {
-          // WSM always uses UUIDs for workspace IDs, but this is not enforced in Sam and there are
-          // old workspaces that don't use UUIDs. Any workspace with a non-UUID workspace ID is
-          // ignored here.
-          continue;
-        }
+    for (var workspaceAndRole : workspaceAndRoleList) {
+      Optional<Workspace> workspaceOptional =
+          workspaceDao.getWorkspaceIfExists(workspaceAndRole.workspaceId());
+      if (workspaceOptional.isEmpty()) {
+        continue;
       }
-    } catch (ApiException apiException) {
-      throw SamExceptionFactory.create("Error listing Workspace Ids in Sam", apiException);
+
+      result.put(
+          workspaceAndRole.workspaceId(),
+          new WorkspaceDescription(
+              workspaceOptional.get(),
+              workspaceAndRole.role(),
+              new ArrayList<String>())); // empty list of missing auth domains
     }
+
     return result;
   }
 
   @Traced
   public void deleteWorkspace(AuthenticatedUserRequest userRequest, UUID uuid)
       throws InterruptedException {
-    String authToken = userRequest.getRequiredToken();
-    ResourcesApi resourceApi = samResourcesApi(authToken);
-    try {
-      SamRetry.retry(
-          () -> resourceApi.deleteResourceV2(SamConstants.SamResource.WORKSPACE, uuid.toString()));
-      logger.info("Deleted Sam resource for workspace {}", uuid);
-    } catch (ApiException apiException) {
-      logger.info("Sam API error while deleting workspace, code is " + apiException.getCode());
-      // Do nothing if the resource to delete is not found, this may not be the first time undo is
-      // called. Other exceptions still need to be surfaced.
-      if (apiException.getCode() == HttpStatus.NOT_FOUND.value()) {
-        logger.info(
-            "Sam error was NOT_FOUND on a deletion call. "
-                + "This just means the deletion was tried twice so no error thrown.");
-        return;
-      }
-      throw SamExceptionFactory.create("Error deleting a workspace in Sam", apiException);
-    }
+
+    notSamService.deleteWorkspaceAuthz(uuid);
   }
 
   @Traced
   public List<String> listResourceActions(
       AuthenticatedUserRequest userRequest, String resourceType, String resourceId)
       throws InterruptedException {
+    // TODO: Azure only method - skip for now
     String authToken = userRequest.getRequiredToken();
     ResourcesApi resourceApi = samResourcesApi(authToken);
     try {
@@ -416,14 +321,7 @@ public class SamService {
       String resourceId,
       String action)
       throws InterruptedException {
-    String accessToken = userRequest.getRequiredToken();
-    ResourcesApi resourceApi = samResourcesApi(accessToken);
-    try {
-      return SamRetry.retry(
-          () -> resourceApi.resourcePermissionV2(iamResourceType, resourceId, action));
-    } catch (ApiException apiException) {
-      throw SamExceptionFactory.create("Error checking resource permission in Sam", apiException);
-    }
+    return notSamService.isAuthorized(userRequest, iamResourceType, resourceId, action);
   }
 
   /**
@@ -448,13 +346,8 @@ public class SamService {
       String userToCheck,
       AuthenticatedUserRequest userRequest)
       throws InterruptedException {
-    ResourcesApi resourceApi = samResourcesApi(userRequest.getRequiredToken());
-    try {
-      return SamRetry.retry(
-          () -> resourceApi.resourceActionV2(iamResourceType, resourceId, action, userToCheck));
-    } catch (ApiException apiException) {
-      throw SamExceptionFactory.create("Error checking resource permission in Sam", apiException);
-    }
+    return notSamService.isOtherUserAuthorized(
+        iamResourceType, resourceId, action, userToCheck, userRequest);
   }
 
   /**
@@ -465,6 +358,8 @@ public class SamService {
   public boolean checkAuthAsWsmSa(
       String iamResourceType, String resourceId, String action, String userToCheck)
       throws InterruptedException {
+    // TODO: this is part of the private resource cleanup path, so no NotSam support
+
     String wsmSaToken = getWsmServiceAccountToken();
     AuthenticatedUserRequest wsmSaRequest =
         new AuthenticatedUserRequest().token(Optional.of(wsmSaToken));
@@ -485,14 +380,17 @@ public class SamService {
   public void checkAuthz(
       AuthenticatedUserRequest userRequest, String type, String uuid, String action)
       throws InterruptedException {
-    boolean isAuthorized = isAuthorized(userRequest, type, uuid, action);
-    final String userEmail = getUserEmailFromSam(userRequest);
-    if (!isAuthorized)
+
+    boolean isAuthorized = notSamService.isAuthorized(userRequest, type, uuid, action);
+    String userEmail = userRequest.getEmail();
+    if (!isAuthorized) {
       throw new ForbiddenException(
           String.format(
               "User %s is not authorized to perform action %s on %s %s",
               userEmail, action, type, uuid));
-    else logger.info("User {} is authorized to {} {} {}", userEmail, action, type, uuid);
+    } else {
+      logger.info("User {} is authorized to {} {} {}", userEmail, action, type, uuid);
+    }
   }
 
   /**
@@ -527,22 +425,8 @@ public class SamService {
   public void grantWorkspaceRole(
       UUID workspaceUuid, AuthenticatedUserRequest userRequest, WsmIamRole role, String email)
       throws InterruptedException {
-    ResourcesApi resourceApi = samResourcesApi(userRequest.getRequiredToken());
-    try {
-      // GCP always uses lowercase email identifiers, so we do the same here for consistency.
-      SamRetry.retry(
-          () ->
-              resourceApi.addUserToPolicyV2(
-                  SamConstants.SamResource.WORKSPACE,
-                  workspaceUuid.toString(),
-                  role.toSamRole(),
-                  email.toLowerCase(),
-                  /* body = */ null));
-      logger.info(
-          "Granted role {} to user {} in workspace {}", role.toSamRole(), email, workspaceUuid);
-    } catch (ApiException apiException) {
-      throw SamExceptionFactory.create("Error granting workspace role in Sam", apiException);
-    }
+
+    notSamService.grantWorkspaceRole(workspaceUuid, userRequest, role, email);
   }
 
   /**
@@ -557,20 +441,7 @@ public class SamService {
       UUID workspaceUuid, AuthenticatedUserRequest userRequest, WsmIamRole role, String email)
       throws InterruptedException {
 
-    ResourcesApi resourceApi = samResourcesApi(userRequest.getRequiredToken());
-    try {
-      SamRetry.retry(
-          () ->
-              resourceApi.removeUserFromPolicyV2(
-                  SamConstants.SamResource.WORKSPACE,
-                  workspaceUuid.toString(),
-                  role.toSamRole(),
-                  email.toLowerCase()));
-      logger.info(
-          "Removed role {} from user {} in workspace {}", role.toSamRole(), email, workspaceUuid);
-    } catch (ApiException apiException) {
-      throw SamExceptionFactory.create("Error removing workspace role in Sam", apiException);
-    }
+    notSamService.revokeWorkspaceRole(workspaceUuid, userRequest, role, email);
   }
 
   /**
@@ -590,7 +461,9 @@ public class SamService {
   public void removeResourceRole(
       ControlledResource resource, ControlledResourceIamRole role, String email)
       throws InterruptedException {
-
+    // TODO: When using NotSam, we do not need to manage revoking on private resources
+    //  as we can restrict private resources by auth domains and by membership in the
+    //  workspace.
     try {
       ResourcesApi wsmSaResourceApi = samResourcesApi(getWsmServiceAccountToken());
       SamRetry.retry(
@@ -657,45 +530,15 @@ public class SamService {
   public List<RoleBinding> listRoleBindings(
       UUID workspaceUuid, AuthenticatedUserRequest userRequest) throws InterruptedException {
 
-    ResourcesApi resourceApi = samResourcesApi(userRequest.getRequiredToken());
-    try {
-      List<AccessPolicyResponseEntryV2> samResult =
-          SamRetry.retry(
-              () ->
-                  resourceApi.listResourcePoliciesV2(
-                      SamConstants.SamResource.WORKSPACE, workspaceUuid.toString()));
-      return samResult.stream()
-          // Don't include WSM's SA as a manager. This is true for all workspaces and not useful to
-          // callers.
-          .filter(entry -> !entry.getPolicyName().equals(WsmIamRole.MANAGER.toSamRole()))
-          // RAWLS_WORKSPACE stage workspaces may have additional roles set by Rawls that WSM
-          // doesn't understand, ignore those.
-          .filter(entry -> WsmIamRole.fromSam(entry.getPolicyName()) != null)
-          .map(
-              entry ->
-                  RoleBinding.builder()
-                      .role(WsmIamRole.fromSam(entry.getPolicyName()))
-                      .users(entry.getPolicy().getMemberEmails())
-                      .build())
-          .collect(Collectors.toList());
-    } catch (ApiException apiException) {
-      throw SamExceptionFactory.create("Error listing role bindings in Sam", apiException);
-    }
+    return notSamService.listRoleBindings(workspaceUuid, userRequest);
   }
 
   /** Wrapper around Sam client to fetch the list of users with a specific role in a workspace. */
+  // TODO: this is only used to cleanup private resources, which isn't needed with NotSam
   @Traced
   public List<String> listUsersWithWorkspaceRole(
       UUID workspaceUuid, WsmIamRole role, AuthenticatedUserRequest userRequest) {
-    ResourcesApi resourcesApi = samResourcesApi(userRequest.getRequiredToken());
-    try {
-      return resourcesApi
-          .getPolicyV2(
-              SamConstants.SamResource.WORKSPACE, workspaceUuid.toString(), role.toSamRole())
-          .getMemberEmails();
-    } catch (ApiException e) {
-      throw SamExceptionFactory.create("Error retrieving workspace policy members from Sam", e);
-    }
+    throw new RuntimeException("Not implemented in NotSam");
   }
 
   // Add code to retrieve and dump the role assignments for WSM controlled resources
@@ -721,154 +564,13 @@ public class SamService {
   @Traced
   public List<WsmIamRole> listRequesterRoles(
       AuthenticatedUserRequest userRequest, String samResourceType, String resourceId) {
-    ResourcesApi resourcesApi = samResourcesApi(userRequest.getRequiredToken());
-    try {
-      return resourcesApi.resourceRolesV2(samResourceType, resourceId).stream()
-          .map(WsmIamRole::fromSam)
-          // RAWLS_WORKSPACE stage workspaces may have additional roles set by Rawls that WSM
-          // doesn't understand, ignore those.
-          .filter(Objects::nonNull)
-          .collect(Collectors.toList());
-    } catch (ApiException e) {
-      throw SamExceptionFactory.create("Error retrieving requester resource roles from Sam", e);
-    }
+    return notSamService.listRequesterRoles(resourceId, userRequest);
   }
 
   @Traced
   public boolean isApplicationEnabledInSam(
       UUID workspaceUuid, String email, AuthenticatedUserRequest userRequest) {
-    // We detect that an application is enabled in Sam by checking if the application has
-    // the create-controlled-application-private action on the workspace.
-    try {
-      ResourcesApi resourcesApi = samResourcesApi(userRequest.getRequiredToken());
-      return resourcesApi.resourceActionV2(
-          SamConstants.SamResource.WORKSPACE,
-          workspaceUuid.toString(),
-          SamConstants.SamWorkspaceAction.CREATE_CONTROLLED_USER_PRIVATE,
-          email);
-    } catch (ApiException apiException) {
-      throw SamExceptionFactory.create("Sam error querying role in Sam", apiException);
-    }
-  }
-
-  /**
-   * Wrapper around Sam client to sync a Sam policy to a Google group. Returns email of that group.
-   *
-   * <p>This operation in Sam is idempotent, so we don't worry about calling this multiple times.
-   */
-  @Traced
-  public String syncWorkspacePolicy(
-      UUID workspaceUuid, WsmIamRole role, AuthenticatedUserRequest userRequest)
-      throws InterruptedException {
-    String group =
-        syncPolicyOnObject(
-            SamConstants.SamResource.WORKSPACE,
-            workspaceUuid.toString(),
-            role.toSamRole(),
-            userRequest);
-    logger.info(
-        "Synced workspace role {} to google group {} in workspace {}",
-        role.toSamRole(),
-        group,
-        workspaceUuid);
-    return group;
-  }
-
-  /**
-   * Retrieve the email of a sync'd workspace policy. This is used during controlled resource
-   * create.
-   *
-   * @param workspaceUuid workspace to use
-   * @param role workspace role to lookup
-   * @param userRequest userRequest
-   * @return email of the sync'd policy group
-   * @throws InterruptedException on shutdown during retry wait
-   */
-  public String getWorkspacePolicy(
-      UUID workspaceUuid, WsmIamRole role, AuthenticatedUserRequest userRequest)
-      throws InterruptedException {
-    GoogleApi googleApi = samGoogleApi(userRequest.getRequiredToken());
-    try {
-      return SamRetry.retry(
-              () ->
-                  googleApi.syncStatus(
-                      SamConstants.SamResource.WORKSPACE,
-                      workspaceUuid.toString(),
-                      role.toSamRole()))
-          .getEmail();
-    } catch (ApiException apiException) {
-      throw SamExceptionFactory.create("Error getting sync policy in Sam", apiException);
-    }
-  }
-
-  /**
-   * Wrapper around Sam client to sync a Sam policy on a controlled resource to a google group and
-   * return the email of that group.
-   *
-   * <p>This should only be called for controlled resources which require permissions granted to
-   * individual users, i.e. user-private or application-controlled resources. All other cases are
-   * handled by the permissions that workspace-level roles inherit on resources via Sam's
-   * hierarchical resources, and do not use the policies synced by this function.
-   *
-   * <p>This operation in Sam is idempotent, so we don't worry about calling this multiple times.
-   *
-   * @param resource The resource to sync a binding for
-   * @param role The policy to sync in Sam
-   * @param userRequest User authentication
-   * @return Sam policy group name
-   */
-  @Traced
-  public String syncResourcePolicy(
-      ControlledResource resource,
-      ControlledResourceIamRole role,
-      AuthenticatedUserRequest userRequest)
-      throws InterruptedException {
-    if (ControlledResourceCategory.get(resource.getAccessScope(), resource.getManagedBy())
-        == ControlledResourceCategory.USER_SHARED) {
-      throw new InternalLogicException(
-          "syncResourcePolicy should not be called for USER managed SHARED access resources!");
-    }
-
-    String group =
-        syncPolicyOnObject(
-            resource.getCategory().getSamResourceName(),
-            resource.getResourceId().toString(),
-            role.toSamRole(),
-            userRequest);
-    logger.info(
-        "Synced resource role {} to google group {} for resource {}",
-        role.toSamRole(),
-        group,
-        resource.getResourceId());
-    return group;
-  }
-
-  /**
-   * Common implementation for syncing a policy to a Google group on an object in Sam.
-   *
-   * @param resourceTypeName The type of the Sam resource, as configured with Sam.
-   * @param resourceId The Sam ID of the resource to sync a policy for
-   * @param policyName The name of the policy to sync
-   * @param userRequest User credentials to pass to Sam
-   * @return The Google group whose membership is synced to the specified policy.
-   */
-  private String syncPolicyOnObject(
-      String resourceTypeName,
-      String resourceId,
-      String policyName,
-      AuthenticatedUserRequest userRequest)
-      throws InterruptedException {
-    GoogleApi googleApi = samGoogleApi(userRequest.getRequiredToken());
-    try {
-      // Sam makes no guarantees about what values are returned from the POST call, so we instead
-      // fetch the group in a separate call after syncing.
-      SamRetry.retry(
-          () -> googleApi.syncPolicy(resourceTypeName, resourceId, policyName, /* body = */ null));
-      return SamRetry.retry(() -> googleApi.syncStatus(resourceTypeName, resourceId, policyName))
-          .getEmail();
-    } catch (ApiException apiException) {
-      throw SamExceptionFactory.create("Error syncing policy in Sam", apiException);
-    }
+    throw new RuntimeException("Not implemented in NotSam");
   }
 
   /**
@@ -889,58 +591,7 @@ public class SamService {
       AuthenticatedUserRequest userRequest)
       throws InterruptedException {
 
-    // We need the WSM SA for setting controlled resource policies
-    initializeWsmServiceAccount();
-    FullyQualifiedResourceId workspaceParentFqId =
-        new FullyQualifiedResourceId()
-            .resourceId(resource.getWorkspaceId().toString())
-            .resourceTypeName(SamConstants.SamResource.WORKSPACE);
-
-    CreateResourceRequestV2 resourceRequest =
-        new CreateResourceRequestV2()
-            .resourceId(resource.getResourceId().toString())
-            .parent(workspaceParentFqId)
-            .authDomain(List.of());
-
-    var builder =
-        new ControlledResourceSamPolicyBuilder(
-            this,
-            privateIamRole,
-            assignedUserEmail,
-            userRequest,
-            ControlledResourceCategory.get(resource.getAccessScope(), resource.getManagedBy()));
-    builder.addPolicies(resourceRequest);
-
-    try {
-      // We use the user request for the create, but could equally well use the WSM SA.
-      // The creating token has no effect on the resource policies.
-      ResourcesApi resourceApi = samResourcesApi(userRequest.getRequiredToken());
-      SamRetry.retry(
-          () ->
-              resourceApi.createResourceV2(
-                  resource.getCategory().getSamResourceName(), resourceRequest));
-      logger.info("Created Sam controlled resource {}", resource.getResourceId());
-
-      dumpRoleBindings(
-          resource.getCategory().getSamResourceName(),
-          resource.getResourceId().toString(),
-          getWsmServiceAccountToken());
-
-    } catch (ApiException apiException) {
-      // Do nothing if the resource to create already exists, this may not be the first time do is
-      // called. Other exceptions still need to be surfaced.
-      // Resource IDs are randomly generated, so we trust that the caller must have created
-      // an existing Sam resource.
-      logger.info(
-          "Sam API error while creating a controlled resource, code is " + apiException.getCode());
-      if (apiException.getCode() == HttpStatus.CONFLICT.value()) {
-        logger.info(
-            "Sam error was CONFLICT on creation request. This means the resource already "
-                + "exists but is not an error so no exception thrown.");
-        return;
-      }
-      throw SamExceptionFactory.create("Error creating controlled resource in Sam", apiException);
-    }
+    notSamService.createControlledResourceAuthz(resource, userRequest);
   }
 
   /**
@@ -953,28 +604,7 @@ public class SamService {
   @Traced
   public void deleteControlledResource(ControlledResource resource, String token)
       throws InterruptedException {
-
-    ResourcesApi resourceApi = samResourcesApi(token);
-    try {
-      SamRetry.retry(
-          () ->
-              resourceApi.deleteResourceV2(
-                  resource.getCategory().getSamResourceName(),
-                  resource.getResourceId().toString()));
-      logger.info("Deleted Sam controlled resource {}", resource.getResourceId());
-    } catch (ApiException apiException) {
-      // Do nothing if the resource to delete is not found, this may not be the first time delete is
-      // called. Other exceptions still need to be surfaced.
-      logger.info(
-          "Sam API error while deleting a controlled resource, code is " + apiException.getCode());
-      if (apiException.getCode() == HttpStatus.NOT_FOUND.value()) {
-        logger.info(
-            "Sam error was NOT_FOUND on a deletion call. "
-                + "This just means the deletion was tried twice so no error thrown.");
-        return;
-      }
-      throw SamExceptionFactory.create("Error deleting controlled resource in Sam", apiException);
-    }
+    notSamService.deleteControlledResourceAuthz(resource);
   }
 
   /**
@@ -988,9 +618,11 @@ public class SamService {
   public void deleteControlledResource(
       ControlledResource resource, AuthenticatedUserRequest userRequest)
       throws InterruptedException {
-    deleteControlledResource(resource, userRequest.getRequiredToken());
+    notSamService.deleteControlledResourceAuthz(resource);
+    //    deleteControlledResource(resource, userRequest.getRequiredToken());
   }
 
+  // NOTE: only used for private resource cleaning
   /**
    * Return the list of roles a user has directly on a private, user-managed controlled resource.
    * This will not return roles that a user holds via group membership.
@@ -1036,50 +668,20 @@ public class SamService {
   }
 
   /**
-   * Builds a policy list with a single provided owner and empty reader, writer and application
-   * policies.
-   *
-   * <p>This is a helper function for building the policy section of a request to create a workspace
-   * resource in Sam. The provided user is granted the OWNER role and empty policies for reader,
-   * writer, and application are also included.
-   *
-   * <p>The empty policies are included because Sam requires all policies on a workspace to be
-   * provided at creation time. Although policy membership can be modified later, policy creation
-   * must happen at the same time as workspace resource creation.
-   */
-  private Map<String, AccessPolicyMembershipV2> defaultWorkspacePolicies(String ownerEmail) {
-    Map<String, AccessPolicyMembershipV2> policyMap = new HashMap<>();
-    policyMap.put(
-        WsmIamRole.OWNER.toSamRole(),
-        new AccessPolicyMembershipV2()
-            .addRolesItem(WsmIamRole.OWNER.toSamRole())
-            .addMemberEmailsItem(ownerEmail));
-    // For all non-owner/manager roles, we create empty policies which can be modified later.
-    for (WsmIamRole workspaceRole : WsmIamRole.values()) {
-      if (workspaceRole != WsmIamRole.OWNER && workspaceRole != WsmIamRole.MANAGER) {
-        policyMap.put(
-            workspaceRole.toSamRole(),
-            new AccessPolicyMembershipV2().addRolesItem(workspaceRole.toSamRole()));
-      }
-    }
-    // We always give WSM's service account the 'manager' role for admin control of workspaces.
-    String wsmSa = GcpUtils.getWsmSaEmail();
-    policyMap.put(
-        WsmIamRole.MANAGER.toSamRole(),
-        new AccessPolicyMembershipV2()
-            .addRolesItem(WsmIamRole.MANAGER.toSamRole())
-            .addMemberEmailsItem(wsmSa));
-    return policyMap;
-  }
-
-  /**
    * Fetch the email of a user's pet service account in a given project. This request to Sam will
    * create the pet SA if it doesn't already exist.
    */
-  public String getOrCreatePetSaEmail(String projectId, String token) throws InterruptedException {
-    GoogleApi googleApi = samGoogleApi(token);
+  // NOTE: I had to change this API so that I could identify the proxy group that this
+  // pet lives in.
+  //  public String getOrCreatePetSaEmail(String projectId, String token) throws
+  // InterruptedException {
+  public String getOrCreatePetSaEmail(String projectId, AuthenticatedUserRequest userRequest)
+      throws InterruptedException {
+    GoogleApi googleApi = samGoogleApi(userRequest.getRequiredToken());
     try {
-      return SamRetry.retry(() -> googleApi.getPetServiceAccount(projectId));
+      String petSaEmail = SamRetry.retry(() -> googleApi.getPetServiceAccount(projectId));
+      notSamService.getOrCreatePetSaEmail(userRequest, petSaEmail);
+      return petSaEmail;
     } catch (ApiException apiException) {
       throw SamExceptionFactory.create("Error getting pet service account from Sam", apiException);
     }
@@ -1093,7 +695,7 @@ public class SamService {
       String projectId, AuthenticatedUserRequest userRequest) throws InterruptedException {
     GoogleApi samGoogleApi = samGoogleApi(userRequest.getRequiredToken());
     try {
-      String petEmail = getOrCreatePetSaEmail(projectId, userRequest.getRequiredToken());
+      String petEmail = getOrCreatePetSaEmail(projectId, userRequest);
       String petToken =
           SamRetry.retry(
               () -> samGoogleApi.getPetServiceAccountToken(projectId, PET_SA_OAUTH_SCOPES));
@@ -1132,10 +734,5 @@ public class SamService {
     } catch (ApiException apiException) {
       throw SamExceptionFactory.create("Error getting user subject ID from Sam", apiException);
     }
-  }
-
-  /** Returns the Sam action for modifying a given IAM role. */
-  private String samActionToModifyRole(WsmIamRole role) {
-    return String.format("share_policy::%s", role.toSamRole());
   }
 }

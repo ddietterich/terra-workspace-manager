@@ -91,6 +91,12 @@ dependencies {
   swaggerCodegen gradle.librarySwaggerCli
   runtimeOnly group: "org.webjars.npm", name: "swagger-ui-dist", version: "3.37.2"
 
+  // Spice deps - I think the grpc stuff comes with the google BOM
+  implementation group: "com.authzed.api", name: "authzed", version: "0.4.0"
+  implementation "io.grpc:grpc-protobuf"
+  implementation "io.grpc:grpc-stub"
+  runtimeOnly "io.grpc:grpc-netty-shaded"
+
   // Spotbugs dependency
   // For SpotBugs annotations
   compileOnly "com.github.spotbugs:spotbugs-annotations:${spotbugs.toolVersion.get()}"

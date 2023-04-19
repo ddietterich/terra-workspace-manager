@@ -6,6 +6,7 @@ import bio.terra.landingzone.library.LandingZoneMain;
 import bio.terra.workspace.app.configuration.external.FeatureConfiguration;
 import bio.terra.workspace.app.configuration.external.WorkspaceDatabaseConfiguration;
 import bio.terra.workspace.service.job.JobService;
+import bio.terra.workspace.service.notsam.UserManager;
 import bio.terra.workspace.service.resource.controlled.ControlledResourceService;
 import bio.terra.workspace.service.workspace.WsmApplicationService;
 import javax.sql.DataSource;
@@ -44,6 +45,11 @@ public final class StartupInitializer {
 
     // Initialize Terra Landing Zone library
     LandingZoneMain.initialize(applicationContext, migrateService);
+
+    // TODO: Make this persistent
+    // Initialize spiceDB, users and proxy groups
+    UserManager userManager = applicationContext.getBean(UserManager.class);
+    userManager.initializeProxyGroups();
 
     // NOTE:
     // Fill in this method with any other initialization that needs to happen

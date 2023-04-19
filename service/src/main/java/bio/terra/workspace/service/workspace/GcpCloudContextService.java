@@ -3,7 +3,6 @@ package bio.terra.workspace.service.workspace;
 import bio.terra.workspace.db.WorkspaceDao;
 import bio.terra.workspace.service.iam.AuthenticatedUserRequest;
 import bio.terra.workspace.service.iam.SamService;
-import bio.terra.workspace.service.iam.model.WsmIamRole;
 import bio.terra.workspace.service.workspace.exceptions.CloudContextRequiredException;
 import bio.terra.workspace.service.workspace.flight.gcp.CreateGcpContextFlightV2;
 import bio.terra.workspace.service.workspace.model.CloudPlatform;
@@ -105,26 +104,9 @@ public class GcpCloudContextService {
    */
   public GcpCloudContext getRequiredGcpCloudContext(
       UUID workspaceUuid, AuthenticatedUserRequest userRequest) throws InterruptedException {
-    GcpCloudContext context =
-        getGcpCloudContext(workspaceUuid)
-            .orElseThrow(
-                () -> new CloudContextRequiredException("Operation requires GCP cloud context"));
-
-    // TODO(PF-1666): Remove this once we've migrated off GcpCloudContext (V1).
-    // policyOwner is a good sentinel for knowing we need to update the cloud context and
-    // store the sync'd workspace policies.
-    if (context.getSamPolicyOwner().isEmpty()) {
-      context.setSamPolicyOwner(
-          samService.getWorkspacePolicy(workspaceUuid, WsmIamRole.OWNER, userRequest));
-      context.setSamPolicyWriter(
-          samService.getWorkspacePolicy(workspaceUuid, WsmIamRole.WRITER, userRequest));
-      context.setSamPolicyReader(
-          samService.getWorkspacePolicy(workspaceUuid, WsmIamRole.READER, userRequest));
-      context.setSamPolicyApplication(
-          samService.getWorkspacePolicy(workspaceUuid, WsmIamRole.APPLICATION, userRequest));
-      workspaceDao.updateCloudContext(workspaceUuid, CloudPlatform.GCP, context.serialize());
-    }
-    return context;
+    return getGcpCloudContext(workspaceUuid)
+        .orElseThrow(
+            () -> new CloudContextRequiredException("Operation requires GCP cloud context"));
   }
 
   /**

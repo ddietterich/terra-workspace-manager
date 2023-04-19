@@ -17,6 +17,7 @@ ch.qos.logback.contrib:logback-json-classic:0.1.5=productionRuntimeClasspath,run
 ch.qos.logback.contrib:logback-json-core:0.1.5=productionRuntimeClasspath,runtimeClasspath,testRuntimeClasspath
 ch.qos.logback:logback-classic:1.2.11=compileClasspath,productionRuntimeClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 ch.qos.logback:logback-core:1.2.11=compileClasspath,productionRuntimeClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+com.authzed.api:authzed:0.4.0=compileClasspath,productionRuntimeClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 com.azure.resourcemanager:azure-resourcemanager-applicationinsights:1.0.0-beta.5=productionRuntimeClasspath,runtimeClasspath,testRuntimeClasspath
 com.azure.resourcemanager:azure-resourcemanager-appplatform:2.18.0=productionRuntimeClasspath,runtimeClasspath,testRuntimeClasspath
 com.azure.resourcemanager:azure-resourcemanager-appservice:2.18.0=productionRuntimeClasspath,runtimeClasspath,testRuntimeClasspath

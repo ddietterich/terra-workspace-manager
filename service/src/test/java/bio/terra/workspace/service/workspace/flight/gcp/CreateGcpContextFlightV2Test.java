@@ -18,7 +18,6 @@ import bio.terra.workspace.connected.UserAccessUtils;
 import bio.terra.workspace.connected.WorkspaceConnectedTestUtils;
 import bio.terra.workspace.service.crl.CrlService;
 import bio.terra.workspace.service.iam.AuthenticatedUserRequest;
-import bio.terra.workspace.service.iam.SamRethrow;
 import bio.terra.workspace.service.iam.SamService;
 import bio.terra.workspace.service.iam.model.WsmIamRole;
 import bio.terra.workspace.service.job.JobMapKeys;
@@ -32,26 +31,21 @@ import bio.terra.workspace.service.workspace.CloudSyncRoleMapping;
 import bio.terra.workspace.service.workspace.GcpCloudContextService;
 import bio.terra.workspace.service.workspace.WorkspaceService;
 import bio.terra.workspace.service.workspace.exceptions.MissingSpendProfileException;
-import bio.terra.workspace.service.workspace.flight.SyncSamGroupsStep;
 import bio.terra.workspace.service.workspace.flight.WorkspaceFlightMapKeys;
 import bio.terra.workspace.service.workspace.model.GcpCloudContext;
 import bio.terra.workspace.service.workspace.model.Workspace;
 import com.google.api.services.cloudresourcemanager.v3.model.Binding;
-import com.google.api.services.cloudresourcemanager.v3.model.GetIamPolicyRequest;
 import com.google.api.services.cloudresourcemanager.v3.model.Policy;
 import com.google.api.services.cloudresourcemanager.v3.model.Project;
 import com.google.api.services.iam.v1.model.Role;
 import java.io.IOException;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -126,7 +120,6 @@ class CreateGcpContextFlightV2Test extends BaseConnectedTest {
             .getProjectBillingInfo("projects/" + projectId)
             .getBillingAccountName());
     assertRolesExist(project);
-    assertPolicyGroupsSynced(workspaceUuid, project);
   }
 
   @Test
@@ -210,7 +203,6 @@ class CreateGcpContextFlightV2Test extends BaseConnectedTest {
     retrySteps.put(SetProjectBillingStep.class.getName(), StepStatus.STEP_RESULT_FAILURE_RETRY);
     retrySteps.put(GrantWsmRoleAdminStep.class.getName(), StepStatus.STEP_RESULT_FAILURE_RETRY);
     retrySteps.put(CreateCustomGcpRolesStep.class.getName(), StepStatus.STEP_RESULT_FAILURE_RETRY);
-    retrySteps.put(SyncSamGroupsStep.class.getName(), StepStatus.STEP_RESULT_FAILURE_RETRY);
     retrySteps.put(GcpCloudSyncStep.class.getName(), StepStatus.STEP_RESULT_FAILURE_RETRY);
     retrySteps.put(CreatePetSaStep.class.getName(), StepStatus.STEP_RESULT_FAILURE_RETRY);
     retrySteps.put(
@@ -257,37 +249,6 @@ class CreateGcpContextFlightV2Test extends BaseConnectedTest {
       List<String> gcpPermissions =
           Optional.ofNullable(gcpRole.getIncludedPermissions()).orElse(Collections.emptyList());
       assertThat(gcpPermissions, containsInAnyOrder(customRole.getIncludedPermissions().toArray()));
-    }
-  }
-
-  /** Asserts that Sam groups are granted their appropriate IAM roles on a GCP project. */
-  private void assertPolicyGroupsSynced(UUID workspaceUuid, Project project) throws Exception {
-    Map<WsmIamRole, String> roleToSamGroup =
-        Arrays.stream(WsmIamRole.values())
-            .collect(
-                Collectors.toMap(
-                    Function.identity(),
-                    role ->
-                        "group:"
-                            + SamRethrow.onInterrupted(
-                                () ->
-                                    samService.syncWorkspacePolicy(
-                                        workspaceUuid,
-                                        role,
-                                        userAccessUtils.defaultUserAuthRequest()),
-                                "syncWorkspacePolicy")));
-    Policy currentPolicy =
-        crl.getCloudResourceManagerCow()
-            .projects()
-            .getIamPolicy(project.getProjectId(), new GetIamPolicyRequest())
-            .execute();
-    for (WsmIamRole role : WsmIamRole.values()) {
-      // Don't check roles which aren't synced to GCP.
-      if (role.equals(WsmIamRole.MANAGER) || role.equals(WsmIamRole.DISCOVERER)) {
-        continue;
-      }
-      assertRoleBindingInPolicy(
-          role, roleToSamGroup.get(role), currentPolicy, project.getProjectId());
     }
   }
 

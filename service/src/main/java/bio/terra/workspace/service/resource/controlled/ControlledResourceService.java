@@ -24,7 +24,6 @@ import bio.terra.workspace.service.job.JobMapKeys;
 import bio.terra.workspace.service.job.JobService;
 import bio.terra.workspace.service.policy.TpsApiDispatch;
 import bio.terra.workspace.service.resource.ResourceValidationUtils;
-import bio.terra.workspace.service.resource.controlled.ControlledResourceSyncMapping.SyncMapping;
 import bio.terra.workspace.service.resource.controlled.cloud.any.flexibleresource.ControlledFlexibleResource;
 import bio.terra.workspace.service.resource.controlled.cloud.azure.vm.ControlledAzureVmResource;
 import bio.terra.workspace.service.resource.controlled.cloud.gcp.GcpPolicyBuilder;
@@ -398,7 +397,7 @@ public class ControlledResourceService {
             () ->
                 samService.getOrCreatePetSaEmail(
                     gcpCloudContextService.getRequiredGcpProject(resource.getWorkspaceId()),
-                    userRequest.getRequiredToken()),
+                    userRequest),
             "enablePet");
     jobBuilder.addParameter(ControlledResourceKeys.CREATE_NOTEBOOK_PARAMETERS, creationParameters);
     jobBuilder.addParameter(ControlledResourceKeys.NOTEBOOK_PET_SERVICE_ACCOUNT, petSaEmail);
@@ -517,35 +516,7 @@ public class ControlledResourceService {
     GcpPolicyBuilder gcpPolicyBuilder =
         new GcpPolicyBuilder(resource, cloudContext.getGcpProjectId(), currentPolicy);
 
-    List<SyncMapping> syncMappings = resource.getCategory().getSyncMappings();
-    for (SyncMapping syncMapping : syncMappings) {
-      String policyGroup = null;
-      switch (syncMapping.getRoleSource()) {
-        case RESOURCE:
-          policyGroup =
-              samService.syncResourcePolicy(
-                  resource, syncMapping.getResourceRole().orElseThrow(BAD_STATE), userRequest);
-          break;
-
-        case WORKSPACE:
-          switch (syncMapping.getWorkspaceRole().orElseThrow(BAD_STATE)) {
-            case OWNER -> policyGroup = cloudContext.getSamPolicyOwner().orElseThrow(BAD_STATE);
-            case WRITER -> policyGroup = cloudContext.getSamPolicyWriter().orElseThrow(BAD_STATE);
-            case READER -> policyGroup = cloudContext.getSamPolicyReader().orElseThrow(BAD_STATE);
-            case APPLICATION -> policyGroup =
-                cloudContext.getSamPolicyApplication().orElseThrow(BAD_STATE);
-            default -> {
-            }
-          }
-          break;
-      }
-      if (policyGroup == null) {
-        throw new InternalLogicException("Policy group not set");
-      }
-
-      gcpPolicyBuilder.addResourceBinding(
-          syncMapping.getTargetRole(), GcpUtils.toGroupMember(policyGroup));
-    }
+    // No sync'd groups anymore
 
     if (features.isTemporaryGrantEnabled()) {
       // Get the user emails we are granting
@@ -556,7 +527,7 @@ public class ControlledResourceService {
           GcpUtils.toSaMember(
               samService.getOrCreatePetSaEmail(
                   gcpCloudContextService.getRequiredGcpProject(resource.getWorkspaceId()),
-                  userRequest.getRequiredToken()));
+                  userRequest));
 
       // NOTE: We always set the role to EDITOR and that is currently always the right
       // role from the sync mappings. If we change the mappings, we may need to change

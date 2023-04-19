@@ -287,8 +287,7 @@ public class ControlledResourceServiceNotebookTest extends BaseConnectedTest {
     // Revoke user's Pet SA access, if they have it. Because these tests re-use a common workspace,
     // the user may have pet SA access enabled prior to this test.
     String serviceAccountEmail =
-        samService.getOrCreatePetSaEmail(
-            projectId, user.getAuthenticatedRequest().getRequiredToken());
+        samService.getOrCreatePetSaEmail(projectId, user.getAuthenticatedRequest());
     petSaService.disablePetServiceAccountImpersonation(
         workspaceId, user.getEmail(), user.getAuthenticatedRequest());
     IamCow userIamCow = crlService.getIamCow(user.getAuthenticatedRequest());

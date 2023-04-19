@@ -71,7 +71,7 @@ workspace:
     timeout-seconds: 1800
 
   private-resource-cleanup:
-    enabled: true
+    enabled: false
     polling-interval: "15m"
     startup-wait: "5s"
 
@@ -136,6 +136,15 @@ workspace:
     sas-token-expiry-time-maximum-minutes-offset: 1440
     azure-monitor-linux-agent-version: "1.22"
     cors-allowed-origins:
+
+  ## NotSam pre-configure users
+  users:
+    emails:
+      - "bella.redwalker@test.firecloud.org"
+      - "elijah.thunderlord@test.firecloud.org"
+      - "avery.stormreaver@test.firecloud.org"
+      - "liam.dragonmaw@test.firecloud.org"
+      - "levi.bonechewer@test.firecloud.org"
 
 terra.common:
   kubernetes:

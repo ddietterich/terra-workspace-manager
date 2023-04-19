@@ -40,14 +40,12 @@ import bio.terra.workspace.generated.model.ApiJobControl;
 import bio.terra.workspace.service.datarepo.DataRepoService;
 import bio.terra.workspace.service.iam.AuthenticatedUserRequest;
 import bio.terra.workspace.service.iam.SamService;
-import bio.terra.workspace.service.iam.model.ControlledResourceIamRole;
 import bio.terra.workspace.service.iam.model.SamConstants;
 import bio.terra.workspace.service.iam.model.SamConstants.SamResource;
 import bio.terra.workspace.service.iam.model.SamConstants.SamSpendProfileAction;
 import bio.terra.workspace.service.iam.model.WsmIamRole;
 import bio.terra.workspace.service.job.JobService;
 import bio.terra.workspace.service.job.exception.InvalidResultStateException;
-import bio.terra.workspace.service.resource.controlled.model.ControlledResource;
 import bio.terra.workspace.service.resource.exception.ResourceNotFoundException;
 import bio.terra.workspace.service.resource.referenced.ReferencedResourceService;
 import bio.terra.workspace.service.resource.referenced.cloud.any.datareposnapshot.ReferencedDataRepoSnapshotResource;
@@ -107,15 +105,7 @@ class WorkspaceServiceTest extends BaseConnectedTest {
             any(), eq(SamResource.SPEND_PROFILE), any(), eq(SamSpendProfileAction.LINK)))
         .thenReturn(true);
     final String policyGroup = "terra-workspace-manager-test-group@googlegroups.com";
-    // Return a valid Google group for cloud sync, as Google validates groups added to GCP projects.
-    when(mockSamService.syncWorkspacePolicy(any(), any(), any())).thenReturn(policyGroup);
 
-    doReturn(policyGroup)
-        .when(mockSamService)
-        .syncResourcePolicy(
-            any(ControlledResource.class),
-            any(ControlledResourceIamRole.class),
-            any(AuthenticatedUserRequest.class));
     when(mockSamService.getUserStatusInfo(any()))
         .thenReturn(
             new UserStatusInfo()

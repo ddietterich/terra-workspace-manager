@@ -108,8 +108,7 @@ public class PetSaService {
             SamRethrow.onInterrupted(
                 () ->
                     samService.getOrCreatePetSaEmail(
-                        gcpCloudContextService.getRequiredGcpProject(workspaceUuid),
-                        userReq.getRequiredToken()),
+                        gcpCloudContextService.getRequiredGcpProject(workspaceUuid), userReq),
                 "enablePet");
         maybePetSaName =
             Optional.of(ServiceAccountName.builder().projectId(projectId).email(saEmail).build());

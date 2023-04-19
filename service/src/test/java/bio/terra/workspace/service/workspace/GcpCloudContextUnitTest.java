@@ -11,11 +11,8 @@ import bio.terra.cloudres.google.cloudresourcemanager.CloudResourceManagerCow;
 import bio.terra.workspace.common.BaseUnitTest;
 import bio.terra.workspace.common.fixtures.ControlledResourceFixtures;
 import bio.terra.workspace.common.fixtures.ReferenceResourceFixtures;
-import bio.terra.workspace.common.fixtures.WorkspaceFixtures;
 import bio.terra.workspace.db.ResourceDao;
 import bio.terra.workspace.db.WorkspaceDao;
-import bio.terra.workspace.service.iam.model.SamConstants.SamSpendProfileAction;
-import bio.terra.workspace.service.iam.model.WsmIamRole;
 import bio.terra.workspace.service.resource.controlled.cloud.gcp.bqdataset.ControlledBigQueryDatasetResource;
 import bio.terra.workspace.service.resource.exception.ResourceNotFoundException;
 import bio.terra.workspace.service.resource.referenced.cloud.gcp.bqdataset.ReferencedBigQueryDatasetResource;
@@ -101,49 +98,6 @@ public class GcpCloudContextUnitTest extends BaseUnitTest {
         InvalidSerializedVersionException.class,
         () -> GcpCloudContext.deserialize(junkJson),
         "Junk JSON should throw");
-  }
-
-  @Test
-  public void autoUpgradeTest() throws Exception {
-    // By default, allow all spend link calls as authorized. (All other isAuthorized calls return
-    // false by Mockito default.
-    Mockito.when(
-            mockSamService()
-                .isAuthorized(
-                    Mockito.any(),
-                    Mockito.any(),
-                    Mockito.any(),
-                    Mockito.eq(SamSpendProfileAction.LINK)))
-        .thenReturn(true);
-
-    // Fake groups
-    Mockito.when(mockSamService().getWorkspacePolicy(any(), Mockito.eq(WsmIamRole.READER), any()))
-        .thenReturn(POLICY_READER);
-    Mockito.when(mockSamService().getWorkspacePolicy(any(), Mockito.eq(WsmIamRole.WRITER), any()))
-        .thenReturn(POLICY_WRITER);
-    Mockito.when(mockSamService().getWorkspacePolicy(any(), Mockito.eq(WsmIamRole.OWNER), any()))
-        .thenReturn(POLICY_OWNER);
-    Mockito.when(
-            mockSamService().getWorkspacePolicy(any(), Mockito.eq(WsmIamRole.APPLICATION), any()))
-        .thenReturn(POLICY_APPLICATION);
-
-    // Create a workspace record
-    UUID workspaceUuid = UUID.randomUUID();
-    var workspace = WorkspaceFixtures.buildMcWorkspace(workspaceUuid);
-    workspaceDao.createWorkspace(workspace, /* applicationIds= */ null);
-
-    // Create a cloud context in the database with a V1 format
-    final String flightId = UUID.randomUUID().toString();
-    workspaceDao.createCloudContextStart(workspaceUuid, CloudPlatform.GCP, flightId);
-    workspaceDao.createCloudContextFinish(workspaceUuid, CloudPlatform.GCP, V1_JSON, flightId);
-
-    // Run the service call that should do the upgrade
-    GcpCloudContext updatedContext =
-        gcpCloudContextService.getRequiredGcpCloudContext(workspaceUuid, USER_REQUEST);
-    assertEquals(updatedContext.getSamPolicyOwner().orElse(null), POLICY_OWNER);
-    assertEquals(updatedContext.getSamPolicyWriter().orElse(null), POLICY_WRITER);
-    assertEquals(updatedContext.getSamPolicyReader().orElse(null), POLICY_READER);
-    assertEquals(updatedContext.getSamPolicyApplication().orElse(null), POLICY_APPLICATION);
   }
 
   @Test

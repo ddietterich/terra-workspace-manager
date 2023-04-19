@@ -12,7 +12,6 @@ import bio.terra.workspace.service.job.JobMapKeys;
 import bio.terra.workspace.service.workspace.CloudSyncRoleMapping;
 import bio.terra.workspace.service.workspace.flight.CheckSpendProfileStep;
 import bio.terra.workspace.service.workspace.flight.GenerateRbsRequestIdStep;
-import bio.terra.workspace.service.workspace.flight.SyncSamGroupsStep;
 import bio.terra.workspace.service.workspace.flight.WorkspaceFlightMapKeys;
 import bio.terra.workspace.service.workspace.model.CloudPlatform;
 import java.util.UUID;
@@ -85,8 +84,6 @@ public class CreateGcpContextFlightV2 extends Flight {
     // do the Sam sync and create the role-based Google groups. That eliminates
     // one propagation case
     addStep(new CreatePetSaStep(appContext.getSamService(), userRequest), shortRetry);
-    addStep(
-        new SyncSamGroupsStep(appContext.getSamService(), workspaceUuid, userRequest), shortRetry);
 
     addStep(
         new GcpCloudSyncStep(
