@@ -478,7 +478,7 @@ public class WorkspaceApiController extends ControllerBase implements WorkspaceA
   @Traced
   @Override
   public ResponseEntity<Void> grantRole(
-      @PathVariable("workspaceId") UUID uuid,
+      @PathVariable("workspaceId") UUID workspaceUuid,
       @PathVariable("role") ApiIamRole role,
       @RequestBody ApiGrantRoleRequestBody body) {
     ControllerValidationUtils.validateEmail(body.getMemberEmail());
@@ -486,29 +486,20 @@ public class WorkspaceApiController extends ControllerBase implements WorkspaceA
       throw new InvalidRoleException(
           "Users cannot grant role APPLICATION. Use application registration instead.");
     }
-    // No additional authz check as this is just a wrapper around a Sam endpoint.
-    SamRethrow.onInterrupted(
-        () ->
-            getSamService()
-                .grantWorkspaceRole(
-                    uuid,
-                    getAuthenticatedInfo(),
-                    WsmIamRole.fromApiModel(role),
-                    body.getMemberEmail()),
-        "grantWorkspaceRole");
-    workspaceActivityLogService.writeActivity(
-        getAuthenticatedInfo(),
-        uuid,
-        OperationType.GRANT_WORKSPACE_ROLE,
-        body.getMemberEmail(),
-        ActivityLogChangedTarget.USER);
+
+    AuthenticatedUserRequest userRequest = getAuthenticatedInfo();
+    logger.info("Grant role {} on workspace {} to {}", role, workspaceUuid, userRequest.getEmail());
+
+    // TODO: we do not define actions for setting IAM; OWN will do for now
+    workspaceService.validateWorkspaceAndAction(userRequest, workspaceUuid, SamWorkspaceAction.OWN);
+    workspaceService.grantRole(workspaceUuid, WsmIamRole.fromApiModel(role), body.getMemberEmail(), userRequest);
     return new ResponseEntity<>(HttpStatus.NO_CONTENT);
   }
 
   @Traced
   @Override
   public ResponseEntity<Void> removeRole(
-      @PathVariable("workspaceId") UUID uuid,
+      @PathVariable("workspaceId") UUID workspaceUuid,
       @PathVariable("role") ApiIamRole role,
       @PathVariable("memberEmail") String memberEmail) {
     ControllerValidationUtils.validateEmail(memberEmail);
@@ -518,7 +509,7 @@ public class WorkspaceApiController extends ControllerBase implements WorkspaceA
     }
     AuthenticatedUserRequest userRequest = getAuthenticatedInfo();
     Workspace workspace =
-        workspaceService.validateMcWorkspaceAndAction(userRequest, uuid, SamWorkspaceAction.OWN);
+        workspaceService.validateMcWorkspaceAndAction(userRequest, workspaceUuid, SamWorkspaceAction.OWN);
     workspaceService.removeWorkspaceRoleFromUser(
         workspace, WsmIamRole.fromApiModel(role), memberEmail, userRequest);
     return new ResponseEntity<>(HttpStatus.NO_CONTENT);

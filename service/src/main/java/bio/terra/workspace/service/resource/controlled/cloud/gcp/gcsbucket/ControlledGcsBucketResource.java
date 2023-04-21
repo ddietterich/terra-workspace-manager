@@ -132,10 +132,8 @@ public class ControlledGcsBucketResource extends ControlledResource {
         cloudRetry);
     flight.addStep(
         new GcsBucketCloudSyncStep(
-            flightBeanBag.getControlledResourceService(),
-            flightBeanBag.getCrlService(),
-            this,
-            userRequest),
+            flightBeanBag.getNotSamService(),
+            this),
         cloudRetry);
   }
 

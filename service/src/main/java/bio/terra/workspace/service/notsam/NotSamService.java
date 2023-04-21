@@ -4,11 +4,14 @@ import bio.terra.common.exception.ForbiddenException;
 import bio.terra.common.tracing.OkHttpClientTracingInterceptor;
 import bio.terra.workspace.app.configuration.external.SamConfiguration;
 import bio.terra.workspace.service.iam.AuthenticatedUserRequest;
+import bio.terra.workspace.service.iam.model.ControlledResourceIamRole;
 import bio.terra.workspace.service.iam.model.RoleBinding;
 import bio.terra.workspace.service.iam.model.WsmIamRole;
+import bio.terra.workspace.service.resource.controlled.cloud.gcp.gcsbucket.ControlledGcsBucketResource;
 import bio.terra.workspace.service.resource.controlled.model.AccessScopeType;
 import bio.terra.workspace.service.resource.controlled.model.ControlledResource;
 import bio.terra.workspace.service.resource.controlled.model.ManagedByType;
+import bio.terra.workspace.service.resource.model.WsmResourceType;
 import bio.terra.workspace.service.spice.SpiceService;
 import bio.terra.workspace.service.workspace.GcpCloudContextService;
 import io.opencensus.trace.Tracing;
@@ -22,6 +25,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -54,7 +58,8 @@ public class NotSamService {
 
   private final SpiceService spiceService;
   private final UserManager userManager;
-  private final AclManager aclManager;
+  private final AclManagerProject aclManagerProject;
+  private final AclManagerBucket aclManagerBucket;
   private final GcpCloudContextService gcpCloudContextService;
   private final OkHttpClient commonHttpClient;
   private final SamConfiguration samConfig;
@@ -63,12 +68,14 @@ public class NotSamService {
   public NotSamService(
     SpiceService spiceService,
     UserManager userManager,
-    AclManager aclManager,
+    AclManagerProject aclManagerProject,
+    AclManagerBucket aclManagerBucket,
     GcpCloudContextService gcpCloudContextService,
     SamConfiguration samConfig) {
     this.spiceService = spiceService;
     this.userManager = userManager;
-    this.aclManager = aclManager;
+    this.aclManagerProject = aclManagerProject;
+    this.aclManagerBucket = aclManagerBucket;
     this.gcpCloudContextService = gcpCloudContextService;
     this.commonHttpClient =
       new ApiClient()
@@ -181,6 +188,7 @@ public class NotSamService {
 
   /**
    * Grant a principal a role on a workspace
+   * NOTE: we rely on upper layers to trigger the ACL updates
    *
    * @param workspaceId workspace to grant to
    * @param userRequest - authenticated user; must have share_policy_<role>
@@ -208,10 +216,10 @@ public class NotSamService {
       workspaceId.toString(),
       role.toSamRole(),
       "membership");
+  }
 
-    if (aclManager.isAclRole(role)) {
-      updateWorkspaceAcl(workspaceId);
-    }
+  public boolean isAclRole(WsmIamRole role) {
+    return aclManagerProject.isAclRole(role);
   }
 
   /**
@@ -241,10 +249,6 @@ public class NotSamService {
       workspaceId.toString(),
       role.toSamRole(),
       "membership");
-
-    if (aclManager.isAclRole(role)) {
-      updateWorkspaceAcl(workspaceId);
-    }
   }
 
   /**
@@ -355,6 +359,46 @@ public class NotSamService {
     return userList;
   }
 
+  public record ResourceRoleBinding(ControlledResourceIamRole role, List<String> users) {}
+  /**
+   * NOTE: this does not do any permission filtering, since it is only used to construct
+   * the IAM roles on behalf of IAM; that is, not running as a user.
+   *
+   * @param resourceId controlled resource
+   * @return list of role bindings
+   */
+  public List<ResourceRoleBinding> listResourceRoleBindings(UUID resourceId) {
+    List<ResourceRoleBinding> resultList = new ArrayList<>();
+    resultList.add(getResourceRoleBinding(resourceId, ControlledResourceIamRole.READER));
+    resultList.add(getResourceRoleBinding(resourceId, ControlledResourceIamRole.WRITER));
+    resultList.add(getResourceRoleBinding(resourceId, ControlledResourceIamRole.EDITOR));
+    return resultList;
+  }
+
+  private ResourceRoleBinding getResourceRoleBinding(UUID resourceId, ControlledResourceIamRole role) {
+    String permission =
+      switch (role) {
+        case READER -> "read";
+        case WRITER -> "write";
+        case EDITOR -> "edit";
+        default -> null;
+      };
+    if (permission == null) {
+      return null;
+    }
+
+    Set<String> subjects =
+      spiceService.lookupSubjects(
+        "controlled_user_shared_resource",
+        resourceId.toString(),
+        permission,
+        "user",
+        null);
+
+    List<String> users = subjects.stream().map(userManager::getUserEmail).toList();
+    return new ResourceRoleBinding(role, users);
+  }
+
   /**
    * Check that a grantor has the right share permission to grant a role. This check is used for
    * both grant and revoke operations.
@@ -440,10 +484,6 @@ public class NotSamService {
 
     return spiceService.checkPermission(subjectId, iamResourceType, resourceId, action);
   }
-
-  // NOTE: application is not implemented, so we always create private resources
-  // owned by the subjectId.
-  // Also, in a real implementation, we would make the enum feed into this
 
   /**
    * Create the authz setup for a controlled resource. NOTE: application is not implemented, so we
@@ -559,18 +599,36 @@ public class NotSamService {
     return proxyGroupList.get(0);
   }
 
-  public void updateWorkspaceAcl(UUID workspaceId) {
+  public void updateWorkspaceAcl(UUID workspaceId, @Nullable List<ControlledResource> controlledResources) {
     // If we have no cloud context, we have nothing to do
     Optional<String> maybeProjectId = gcpCloudContextService.getGcpProject(workspaceId);
     if (maybeProjectId.isEmpty()) {
       return;
     }
-    updateProjectAcl(workspaceId, maybeProjectId.get());
+    String projectId = maybeProjectId.get();
+    updateProjectAcl(workspaceId, projectId);
+
+    if (controlledResources != null) {
+      for (ControlledResource resource : controlledResources) {
+        // TODO: We are only dealing with shared buckets for the prototype
+        if (resource.getResourceType() != WsmResourceType.CONTROLLED_GCP_GCS_BUCKET
+        && resource.getAccessScope() != AccessScopeType.ACCESS_SCOPE_SHARED) {
+          continue;
+        }
+
+        updateBucketAcl(resource.castByEnum(WsmResourceType.CONTROLLED_GCP_GCS_BUCKET), projectId);
+      }
+    }
+  }
+
+  public void updateBucketAcl(ControlledGcsBucketResource resource, String projectId) {
+    List<ResourceRoleBinding> roleBindings = listResourceRoleBindings(resource.getResourceId());
+    aclManagerBucket.updateBucketAcl(resource, projectId, roleBindings);
   }
 
   public void updateProjectAcl(UUID workspaceId, String projectId) {
     List<RoleBinding> roleBindings = listRoleBindings(workspaceId, userManager.getWsmSaSubjectId());
-    aclManager.updateProjectAcl(projectId, roleBindings);
+    aclManagerProject.updateProjectAcl(projectId, roleBindings);
   }
 
   public String getEmailFromToken(String accessToken) {
@@ -586,6 +644,5 @@ public class NotSamService {
     } catch (ApiException e) {
       throw new RuntimeException(e);
     }
-
   }
 }

@@ -10,6 +10,7 @@ import bio.terra.stairway.exception.RetryException;
 import bio.terra.workspace.common.utils.FlightUtils;
 import bio.terra.workspace.service.crl.CrlService;
 import bio.terra.workspace.service.iam.AuthenticatedUserRequest;
+import bio.terra.workspace.service.notsam.NotSamService;
 import bio.terra.workspace.service.resource.controlled.ControlledResourceService;
 import bio.terra.workspace.service.workspace.flight.WorkspaceFlightMapKeys.ControlledResourceKeys;
 import bio.terra.workspace.service.workspace.model.GcpCloudContext;
@@ -21,43 +22,25 @@ import org.springframework.http.HttpStatus;
 
 /** A step for granting cloud permissions on resources to workspace members. */
 public class GcsBucketCloudSyncStep implements Step {
-
-  private final ControlledResourceService controlledResourceService;
-  private final CrlService crlService;
   private final ControlledGcsBucketResource resource;
-  private final AuthenticatedUserRequest userRequest;
-  private final Logger logger = LoggerFactory.getLogger(GcsBucketCloudSyncStep.class);
+  private final NotSamService notSamService;
 
   public GcsBucketCloudSyncStep(
-      ControlledResourceService controlledResourceService,
-      CrlService crlService,
-      ControlledGcsBucketResource resource,
-      AuthenticatedUserRequest userRequest) {
-    this.controlledResourceService = controlledResourceService;
-    this.crlService = crlService;
+      NotSamService notSamService,
+      ControlledGcsBucketResource resource) {
     this.resource = resource;
-    this.userRequest = userRequest;
+    this.notSamService = notSamService;
   }
 
   @Override
   public StepResult doStep(FlightContext flightContext)
       throws InterruptedException, RetryException {
     FlightMap workingMap = flightContext.getWorkingMap();
-    FlightUtils.validateRequiredEntries(workingMap, ControlledResourceKeys.GCP_CLOUD_CONTEXT);
     GcpCloudContext cloudContext =
-        workingMap.get(ControlledResourceKeys.GCP_CLOUD_CONTEXT, GcpCloudContext.class);
+      FlightUtils.getRequired(workingMap, ControlledResourceKeys.GCP_CLOUD_CONTEXT, GcpCloudContext.class);
 
-    // Users do not have read or write access to IAM policies, so requests are executed via
-    // WSM's service account.
-    StorageCow wsmSaStorageCow = crlService.createStorageCow(cloudContext.getGcpProjectId());
-    Policy currentPolicy = wsmSaStorageCow.getIamPolicy(resource.getBucketName());
-    Policy newPolicy =
-        controlledResourceService.configureGcpPolicyForResource(
-            resource, cloudContext, currentPolicy, userRequest);
-    logger.info(
-        "Syncing workspace roles to GCP permissions on bucket {}", resource.getBucketName());
     try {
-      wsmSaStorageCow.setIamPolicy(resource.getBucketName(), newPolicy);
+      notSamService.updateBucketAcl(resource, cloudContext.getGcpProjectId());
     } catch (StorageException e) {
       if (HttpStatus.valueOf(e.getCode()).is4xxClientError()) {
         return new StepResult(StepStatus.STEP_RESULT_FAILURE_RETRY, e);

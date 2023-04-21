@@ -19,7 +19,9 @@ import bio.terra.workspace.service.job.JobBuilder;
 import bio.terra.workspace.service.job.JobMapKeys;
 import bio.terra.workspace.service.job.JobService;
 import bio.terra.workspace.service.logging.WorkspaceActivityLogService;
+import bio.terra.workspace.service.notsam.NotSamService;
 import bio.terra.workspace.service.resource.controlled.flight.clone.workspace.CloneWorkspaceFlight;
+import bio.terra.workspace.service.resource.controlled.model.ControlledResource;
 import bio.terra.workspace.service.resource.model.CloningInstructions;
 import bio.terra.workspace.service.stage.StageService;
 import bio.terra.workspace.service.workspace.exceptions.BufferServiceDisabledException;
@@ -35,6 +37,7 @@ import bio.terra.workspace.service.workspace.flight.azure.DeleteAzureContextFlig
 import bio.terra.workspace.service.workspace.flight.gcp.CreateGcpContextFlightV2;
 import bio.terra.workspace.service.workspace.flight.gcp.DeleteGcpContextFlight;
 import bio.terra.workspace.service.workspace.flight.gcp.RemoveUserFromWorkspaceFlight;
+import bio.terra.workspace.service.workspace.model.CloudPlatform;
 import bio.terra.workspace.service.workspace.model.OperationType;
 import bio.terra.workspace.service.workspace.model.Workspace;
 import bio.terra.workspace.service.workspace.model.WorkspaceDescription;
@@ -72,6 +75,7 @@ public class WorkspaceService {
   private final FeatureConfiguration features;
   private final ResourceDao resourceDao;
   private final WorkspaceActivityLogService workspaceActivityLogService;
+  private final NotSamService notSamService;
 
   @Autowired
   public WorkspaceService(
@@ -83,7 +87,8 @@ public class WorkspaceService {
       StageService stageService,
       FeatureConfiguration features,
       ResourceDao resourceDao,
-      WorkspaceActivityLogService workspaceActivityLogService) {
+      WorkspaceActivityLogService workspaceActivityLogService,
+      NotSamService notSamService) {
     this.jobService = jobService;
     this.applicationDao = applicationDao;
     this.workspaceDao = workspaceDao;
@@ -93,6 +98,7 @@ public class WorkspaceService {
     this.features = features;
     this.resourceDao = resourceDao;
     this.workspaceActivityLogService = workspaceActivityLogService;
+    this.notSamService = notSamService;
   }
 
   /** Create a workspace with the specified parameters. Returns workspaceID of the new workspace. */
@@ -628,5 +634,32 @@ public class WorkspaceService {
         .addParameter(WorkspaceFlightMapKeys.USER_TO_REMOVE, targetUserEmail)
         .addParameter(WorkspaceFlightMapKeys.ROLE_TO_REMOVE, role.name())
         .submitAndWait();
+
+    // TODO: We should do both grant and revoke inside a flight and have this as a step with retrying
+    updateAcls(workspace.getWorkspaceId(), role);
   }
+
+  public void grantRole(UUID workspaceId, WsmIamRole role, String memberEmail, AuthenticatedUserRequest userRequest) {
+    SamRethrow.onInterrupted(
+      () ->
+        samService.grantWorkspaceRole(workspaceId, userRequest, role, memberEmail),
+      "grantWorkspaceRole");
+    workspaceActivityLogService.writeActivity(
+      userRequest,
+      workspaceId,
+      OperationType.GRANT_WORKSPACE_ROLE,
+      memberEmail,
+      ActivityLogChangedTarget.USER);
+
+    updateAcls(workspaceId, role);
+  }
+
+  private void updateAcls(UUID workspaceId, WsmIamRole role) {
+    if (notSamService.isAclRole(role)) {
+      List<ControlledResource> controlledResources =
+          resourceDao.listControlledResources(workspaceId, CloudPlatform.GCP);
+      notSamService.updateWorkspaceAcl(workspaceId, controlledResources);
+    }
+  }
+
 }

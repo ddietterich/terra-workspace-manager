@@ -21,15 +21,6 @@ import java.util.Set;
 public class AclMap {
   private final Map<String, List<String>> roleMap = new HashMap<>();
 
-  // Construct the map from a policy
-  public AclMap(Policy policy) {
-    List<Binding> bindings = policy.getBindings();
-    if (bindings != null) {
-      for (Binding binding : bindings) {
-        roleMap.put(binding.getRole(), binding.getMembers());
-      }
-    }
-  }
 
   public AclMap() {}
 
@@ -107,9 +98,11 @@ public class AclMap {
    * @return true if the lists are equal
    */
   private boolean listsAreEqual(List<String> listOne, List<String> listTwo) {
+    if (listOne.size() != listTwo.size()) {
+      return false;
+    }
     List<String> differences = new ArrayList<>(listOne);
     differences.removeAll(listTwo);
     return (differences.size() == 0);
   }
-
 }
