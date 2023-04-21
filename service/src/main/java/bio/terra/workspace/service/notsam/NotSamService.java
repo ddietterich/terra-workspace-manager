@@ -1,6 +1,8 @@
 package bio.terra.workspace.service.notsam;
 
 import bio.terra.common.exception.ForbiddenException;
+import bio.terra.common.tracing.OkHttpClientTracingInterceptor;
+import bio.terra.workspace.app.configuration.external.SamConfiguration;
 import bio.terra.workspace.service.iam.AuthenticatedUserRequest;
 import bio.terra.workspace.service.iam.model.RoleBinding;
 import bio.terra.workspace.service.iam.model.WsmIamRole;
@@ -8,16 +10,26 @@ import bio.terra.workspace.service.resource.controlled.model.AccessScopeType;
 import bio.terra.workspace.service.resource.controlled.model.ControlledResource;
 import bio.terra.workspace.service.resource.controlled.model.ManagedByType;
 import bio.terra.workspace.service.spice.SpiceService;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
+import bio.terra.workspace.service.workspace.GcpCloudContextService;
+import io.opencensus.trace.Tracing;
+import okhttp3.OkHttpClient;
+import org.broadinstitute.dsde.workbench.client.sam.ApiClient;
+import org.broadinstitute.dsde.workbench.client.sam.ApiException;
+import org.broadinstitute.dsde.workbench.client.sam.api.UsersApi;
+import org.broadinstitute.dsde.workbench.client.sam.model.UserStatusInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 
 /**
  * NOTES:
@@ -42,11 +54,38 @@ public class NotSamService {
 
   private final SpiceService spiceService;
   private final UserManager userManager;
+  private final AclManager aclManager;
+  private final GcpCloudContextService gcpCloudContextService;
+  private final OkHttpClient commonHttpClient;
+  private final SamConfiguration samConfig;
 
   @Autowired
-  public NotSamService(SpiceService spiceService, UserManager userManager) {
+  public NotSamService(
+    SpiceService spiceService,
+    UserManager userManager,
+    AclManager aclManager,
+    GcpCloudContextService gcpCloudContextService,
+    SamConfiguration samConfig) {
     this.spiceService = spiceService;
     this.userManager = userManager;
+    this.aclManager = aclManager;
+    this.gcpCloudContextService = gcpCloudContextService;
+    this.commonHttpClient =
+      new ApiClient()
+        .getHttpClient()
+        .newBuilder()
+        .addInterceptor(new OkHttpClientTracingInterceptor(Tracing.getTracer()))
+        .build();
+    this.samConfig = samConfig;
+  }
+
+  public void initialize(String wsmSaEmail) {
+    userManager.initializeProxyGroups();
+    userManager.addWsmSa(wsmSaEmail);
+
+    // TODO: Decide how to use watching
+    // Start the watcher flight
+    //launchWatcher();
   }
 
   /**
@@ -59,7 +98,7 @@ public class NotSamService {
    */
   public void createWorkspaceAuthz(
       AuthenticatedUserRequest userRequest, UUID workspaceId, List<String> authDomainList) {
-    if (authDomainList != null && authDomainList.size() == 0) {
+    if (authDomainList != null && authDomainList.size() != 0) {
       throw new RuntimeException("Auth domain groups are not supported in the proto yet");
     }
 
@@ -67,7 +106,12 @@ public class NotSamService {
 
     // Grant the creating user the owner role on the workspace
     spiceService.createRelationship(
-        "proxy_group", proxyGroupId, "workspace", workspaceId.toString(), "owner", null);
+        "proxy_group",
+      proxyGroupId,
+      "workspace",
+      workspaceId.toString(),
+      "owner",
+      "membership");
 
     // Grant WSM the manager role on the workspace
     spiceService.createRelationship(
@@ -76,7 +120,7 @@ public class NotSamService {
         "workspace",
         workspaceId.toString(),
         "manager",
-        null);
+        "membership");
   }
 
   public record WorkspaceAndRole(UUID workspaceId, WsmIamRole role) {}
@@ -92,7 +136,12 @@ public class NotSamService {
     // Find all of the workspaces where this proxy group has a role
     List<SpiceService.SpiceRelationship> relationships =
         spiceService.readResourceRelationships(
-            "workspace", null, null, "proxy_group", proxyGroupId, null);
+            "workspace",
+          null,
+          null,
+          "proxy_group",
+          proxyGroupId,
+          "membership");
 
     Map<String, WsmIamRole> workspaceRoleMap = new HashMap<>();
 
@@ -153,7 +202,16 @@ public class NotSamService {
     String proxyGroupId = getProxyGroupIdFromSubjectId(granteeSubjectId);
 
     spiceService.createRelationship(
-        "proxy_group", proxyGroupId, "workspace", workspaceId.toString(), role.toSamRole(), null);
+      "proxy_group",
+      proxyGroupId,
+      "workspace",
+      workspaceId.toString(),
+      role.toSamRole(),
+      "membership");
+
+    if (aclManager.isAclRole(role)) {
+      updateWorkspaceAcl(workspaceId);
+    }
   }
 
   /**
@@ -177,7 +235,16 @@ public class NotSamService {
     String granteeSubjectId = getSubjectIdFromEmail(granteeEmail);
     String proxyGroupId = getProxyGroupIdFromSubjectId(granteeSubjectId);
     spiceService.deleteRelationship(
-        "proxy_group", proxyGroupId, "workspace", workspaceId.toString(), role.toSamRole(), null);
+      "proxy_group",
+      proxyGroupId,
+      "workspace",
+      workspaceId.toString(),
+      role.toSamRole(),
+      "membership");
+
+    if (aclManager.isAclRole(role)) {
+      updateWorkspaceAcl(workspaceId);
+    }
   }
 
   /**
@@ -192,31 +259,31 @@ public class NotSamService {
   public List<RoleBinding> listRoleBindings(
       UUID workspaceId, AuthenticatedUserRequest userRequest) {
     String subjectId = getProxyGroupIdFromUserRequest(userRequest);
-    List<RoleBinding> resultList = new ArrayList<>();
+    return listRoleBindings(workspaceId, subjectId);
+  }
 
-    // Compute
-    boolean hasOwner = false;
-    boolean hasAll = false;
+  // This is a permission check that filters what roles the subject is allowed to see
+  private List<WsmIamRole> visibleRolesForSubject(UUID workspaceId, String subjectId) {
+
+    // If the subject can read all policies, return that
     if (spiceService.checkPermission(
-        subjectId, "workspace", workspaceId.toString(), "read_policies")) {
-      hasAll = true;
-      hasOwner = true;
-    } else {
-      hasOwner =
-          spiceService.checkPermission(
-              subjectId, "workspace", workspaceId.toString(), "read_policy_owner");
+      subjectId, "workspace", workspaceId.toString(), "read_policies")) {
+      return List.of(WsmIamRole.OWNER, WsmIamRole.WRITER, WsmIamRole.READER, WsmIamRole.DISCOVERER);
     }
 
-    // Get the owners
-    if (hasOwner) {
-      resultList.add(getRoleSubjects(workspaceId, WsmIamRole.OWNER));
+    // If the subject can just read owner, return that
+    if (spiceService.checkPermission(
+      subjectId, "workspace", workspaceId.toString(), "read_policy_owner")) {
+      return List.of(WsmIamRole.OWNER);
     }
 
-    // Get the rest, if need be
-    if (hasAll) {
-      resultList.add(getRoleSubjects(workspaceId, WsmIamRole.WRITER));
-      resultList.add(getRoleSubjects(workspaceId, WsmIamRole.READER));
-      resultList.add(getRoleSubjects(workspaceId, WsmIamRole.DISCOVERER));
+    return Collections.emptyList();
+  }
+
+  public List<RoleBinding> listRoleBindings(UUID workspaceId, String subjectId) {
+    List<RoleBinding> resultList = new ArrayList<>();
+    for (WsmIamRole role : visibleRolesForSubject(workspaceId, subjectId)) {
+      resultList.add(getRoleSubjects(workspaceId, role));
     }
     return resultList;
   }
@@ -224,7 +291,11 @@ public class NotSamService {
   private RoleBinding getRoleSubjects(UUID workspaceId, WsmIamRole role) {
     Set<String> subjects =
         spiceService.lookupSubjects(
-            "workspace", workspaceId.toString(), role.toSamRole(), "proxy_group");
+            "workspace",
+          workspaceId.toString(),
+          role.toSamRole(),
+          "user",
+          null);
     return RoleBinding.builder()
         .role(role)
         .users(subjects.stream().map(userManager::getUserEmail).toList())
@@ -255,8 +326,33 @@ public class NotSamService {
 
   private boolean doesSubjectHaveRole(String workspaceId, String subjectId, WsmIamRole role) {
     Set<String> subjects =
-        spiceService.lookupSubjects("workspace", workspaceId, role.toSamRole(), "proxy_group");
+        spiceService.lookupSubjects("workspace", workspaceId, role.toSamRole(), "user", null);
     return subjects.contains(subjectId);
+  }
+
+  // TODO: this is the wrong interface. What the caller really wants to know is if the user has a direct
+  //  role on the workspace. The NotSam implementation returns either a list of one (the requesting user)
+  //  or an empty list.
+  //  Also, since we have not implemented groups, we can naively do the subject lookup.
+  public List<String> listUsersWithWorkspaceRole(UUID workspaceId, WsmIamRole role, AuthenticatedUserRequest userRequest) {
+    List<String> userList = new ArrayList<>();
+
+    String subjectId = getSubjectIdFromUserRequest(userRequest);
+    List<WsmIamRole> visibleRoles = visibleRolesForSubject(workspaceId, subjectId);
+    if (visibleRoles.contains(role)) {
+      Set<String> subjects =
+        spiceService.lookupSubjects(
+          "workspace",
+          workspaceId.toString(),
+          role.toSamRole(),
+          "user",
+          null);
+
+      for (String oneSubjectId : subjects) {
+        userList.add(userManager.getUserEmail(oneSubjectId));
+      }
+    }
+    return userList;
   }
 
   /**
@@ -336,6 +432,12 @@ public class NotSamService {
   /** Common worker for isAuthorized variants */
   private boolean isAuthorized(
       String subjectId, String iamResourceType, String resourceId, String action) {
+
+    // TODO: implement spend profiles. For new we "hard mock" all spend profile checks
+    if (iamResourceType.equals("spend-profile")) {
+      return true;
+    }
+
     return spiceService.checkPermission(subjectId, iamResourceType, resourceId, action);
   }
 
@@ -383,7 +485,7 @@ public class NotSamService {
           "controlled_user_private_resource",
           resourceId,
           "editor",
-          null);
+          "membership");
     }
   }
 
@@ -414,7 +516,11 @@ public class NotSamService {
    * @return subject id
    */
   private String getSubjectIdFromUserRequest(AuthenticatedUserRequest userRequest) {
-    return getSubjectIdFromEmail(userRequest.getEmail());
+    String email =
+      userRequest.getEmail() == null
+        ? getEmailFromToken(userRequest.getRequiredToken())
+        : userRequest.getEmail();
+    return getSubjectIdFromEmail(email);
   }
 
   private String getSubjectIdFromEmail(String email) {
@@ -451,5 +557,35 @@ public class NotSamService {
     }
 
     return proxyGroupList.get(0);
+  }
+
+  public void updateWorkspaceAcl(UUID workspaceId) {
+    // If we have no cloud context, we have nothing to do
+    Optional<String> maybeProjectId = gcpCloudContextService.getGcpProject(workspaceId);
+    if (maybeProjectId.isEmpty()) {
+      return;
+    }
+    updateProjectAcl(workspaceId, maybeProjectId.get());
+  }
+
+  public void updateProjectAcl(UUID workspaceId, String projectId) {
+    List<RoleBinding> roleBindings = listRoleBindings(workspaceId, userManager.getWsmSaSubjectId());
+    aclManager.updateProjectAcl(projectId, roleBindings);
+  }
+
+  public String getEmailFromToken(String accessToken) {
+    // OkHttpClient objects manage their own thread pools, so it's much more performant to share one
+    // across requests.
+    ApiClient apiClient =
+      new ApiClient().setHttpClient(commonHttpClient).setBasePath(samConfig.getBasePath());
+      apiClient.setAccessToken(accessToken);
+    UsersApi usersApi = new UsersApi(apiClient);
+    try {
+      UserStatusInfo userStatusInfo = usersApi.getUserStatusInfo();
+      return userStatusInfo.getUserEmail();
+    } catch (ApiException e) {
+      throw new RuntimeException(e);
+    }
+
   }
 }

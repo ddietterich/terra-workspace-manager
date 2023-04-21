@@ -2,14 +2,21 @@ package bio.terra.workspace.app;
 
 import bio.terra.common.db.DataSourceInitializer;
 import bio.terra.common.migrate.LiquibaseMigrator;
+import bio.terra.common.sam.SamRetry;
 import bio.terra.landingzone.library.LandingZoneMain;
 import bio.terra.workspace.app.configuration.external.FeatureConfiguration;
 import bio.terra.workspace.app.configuration.external.WorkspaceDatabaseConfiguration;
+import bio.terra.workspace.service.iam.SamService;
 import bio.terra.workspace.service.job.JobService;
+import bio.terra.workspace.service.notsam.NotSamService;
 import bio.terra.workspace.service.notsam.UserManager;
 import bio.terra.workspace.service.resource.controlled.ControlledResourceService;
 import bio.terra.workspace.service.workspace.WsmApplicationService;
 import javax.sql.DataSource;
+
+import org.broadinstitute.dsde.workbench.client.sam.ApiException;
+import org.broadinstitute.dsde.workbench.client.sam.api.UsersApi;
+import org.broadinstitute.dsde.workbench.client.sam.model.UserStatusInfo;
 import org.springframework.context.ApplicationContext;
 
 public final class StartupInitializer {
@@ -24,6 +31,8 @@ public final class StartupInitializer {
     WsmApplicationService appService = applicationContext.getBean(WsmApplicationService.class);
     FeatureConfiguration featureConfiguration =
         applicationContext.getBean(FeatureConfiguration.class);
+    NotSamService notSamService = applicationContext.getBean(NotSamService.class);
+    SamService samService = applicationContext.getBean(SamService.class);
 
     // Log the state of the feature flags
     featureConfiguration.logFeatures();
@@ -46,10 +55,20 @@ public final class StartupInitializer {
     // Initialize Terra Landing Zone library
     LandingZoneMain.initialize(applicationContext, migrateService);
 
-    // TODO: Make this persistent
+    // TODO: This is all temporary and ephemeral
+    // Get the username of the "wsm SA" == current application credential
+    String wsmSaEmail;
+    try {
+      String wsmAccessToken = samService.getWsmServiceAccountToken();
+      UsersApi usersApi = samService.samUsersApi(wsmAccessToken);
+      UserStatusInfo userStatusInfo = SamRetry.retry(usersApi::getUserStatusInfo);
+      wsmSaEmail = userStatusInfo.getUserEmail();
+    } catch (ApiException | InterruptedException e) {
+      throw new RuntimeException(e);
+    }
+
     // Initialize spiceDB, users and proxy groups
-    UserManager userManager = applicationContext.getBean(UserManager.class);
-    userManager.initializeProxyGroups();
+    notSamService.initialize(wsmSaEmail);
 
     // NOTE:
     // Fill in this method with any other initialization that needs to happen
@@ -59,5 +78,7 @@ public final class StartupInitializer {
     ControlledResourceService controlledResourceService =
         applicationContext.getBean(ControlledResourceService.class);
     controlledResourceService.updateControlledBigQueryDatasetsLifetimeAsync();
+
+
   }
 }

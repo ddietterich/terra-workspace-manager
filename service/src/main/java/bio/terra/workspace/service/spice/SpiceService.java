@@ -84,7 +84,14 @@ public class SpiceService {
     }
   }
 
-  public ZedToken watch(String resourceType, @Nullable ZedToken startZedToken) {
+  /**
+   * TODO: probably want to change to the non-blocking stub and let the upper layer provide the callback.
+   *
+   * @param resourceType like "workspace"
+   * @param startZedToken like null
+   * @return iterator to process a continuous flow of watch responses
+   */
+  public Iterator<WatchServiceOuterClass.WatchResponse> watch(String resourceType, @Nullable ZedToken startZedToken) {
 
     var builder =
         WatchServiceOuterClass.WatchRequest.newBuilder().addOptionalObjectTypes(resourceType);
@@ -93,30 +100,8 @@ public class SpiceService {
       builder.setOptionalStartCursor(startZedToken);
     }
 
-    ZedToken updateZedToken = null;
+    return  grpcWatchServiceBlockingStub.watch(builder.build());
 
-    logger.info("WATCH START--");
-    var watchIterator = grpcWatchServiceBlockingStub.watch(builder.build());
-    while (watchIterator.hasNext()) {
-      WatchServiceOuterClass.WatchResponse response = watchIterator.next();
-      updateZedToken = response.getChangesThrough();
-
-      for (RelationshipUpdate update : response.getUpdatesList()) {
-        Relationship relationship = update.getRelationship();
-
-        logger.info(
-            "UPDATE {} resource {}:{}  relation {}  subject {}:{}",
-            update.getOperation(),
-            relationship.getResource().getObjectType(),
-            relationship.getResource().getObjectId(),
-            relationship.getRelation(),
-            relationship.getSubject().getObject().getObjectType(),
-            relationship.getSubject().getObject().getObjectId());
-      }
-    }
-    logger.info("WATCH END--");
-
-    return (updateZedToken == null ? startZedToken : updateZedToken);
   }
 
   public void createRelationship(
@@ -510,17 +495,25 @@ public class SpiceService {
 
   // Returns list of unique subject ids
   public Set<String> lookupSubjects(
-      String resourceType, String resourceId, String permission, String subjectType) {
+      String resourceType,
+      String resourceId,
+      String permission,
+      String subjectType,
+      @Nullable String subjectRelation) {
 
     var builder =
-        PermissionService.LookupSubjectsRequest.newBuilder()
-            .setResource(
-                ObjectReference.newBuilder()
-                    .setObjectType(resourceType)
-                    .setObjectId(resourceId)
-                    .build())
-            .setPermission(permission)
-            .setSubjectObjectType(subjectType);
+      PermissionService.LookupSubjectsRequest.newBuilder()
+        .setResource(
+          ObjectReference.newBuilder()
+            .setObjectType(resourceType)
+            .setObjectId(resourceId)
+            .build())
+        .setPermission(permission)
+        .setSubjectObjectType(subjectType);
+
+    if (subjectRelation != null) {
+      builder.setOptionalSubjectRelation(subjectRelation);
+    }
 
     // If zedToken isn't set yet, do a fully consistent request and store the
     // zedToken returned in the response (below)

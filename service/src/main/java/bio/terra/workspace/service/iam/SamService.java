@@ -534,11 +534,12 @@ public class SamService {
   }
 
   /** Wrapper around Sam client to fetch the list of users with a specific role in a workspace. */
-  // TODO: this is only used to cleanup private resources, which isn't needed with NotSam
+  // TODO: this is the wrong interface. What we really want is to know if the user has a direct
+  //  role on the workspace. So in a not-prototype, we could make this much better.
   @Traced
   public List<String> listUsersWithWorkspaceRole(
       UUID workspaceUuid, WsmIamRole role, AuthenticatedUserRequest userRequest) {
-    throw new RuntimeException("Not implemented in NotSam");
+    return notSamService.listUsersWithWorkspaceRole(workspaceUuid, role, userRequest);
   }
 
   // Add code to retrieve and dump the role assignments for WSM controlled resources

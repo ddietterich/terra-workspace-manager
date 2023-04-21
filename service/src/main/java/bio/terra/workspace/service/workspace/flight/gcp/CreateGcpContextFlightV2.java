@@ -9,6 +9,8 @@ import bio.terra.workspace.common.utils.RetryRules;
 import bio.terra.workspace.service.crl.CrlService;
 import bio.terra.workspace.service.iam.AuthenticatedUserRequest;
 import bio.terra.workspace.service.job.JobMapKeys;
+import bio.terra.workspace.service.notsam.AclManager;
+import bio.terra.workspace.service.notsam.NotSamService;
 import bio.terra.workspace.service.workspace.CloudSyncRoleMapping;
 import bio.terra.workspace.service.workspace.flight.CheckSpendProfileStep;
 import bio.terra.workspace.service.workspace.flight.GenerateRbsRequestIdStep;
@@ -43,6 +45,7 @@ public class CreateGcpContextFlightV2 extends Flight {
     CloudSyncRoleMapping cloudSyncRoleMapping = appContext.getCloudSyncRoleMapping();
     CrlService crl = appContext.getCrlService();
     FeatureConfiguration featureConfiguration = appContext.getFeatureConfiguration();
+    NotSamService notSamService = appContext.getNotSamService();
 
     UUID workspaceUuid =
         UUID.fromString(inputParameters.get(WorkspaceFlightMapKeys.WORKSPACE_ID, String.class));
@@ -87,13 +90,8 @@ public class CreateGcpContextFlightV2 extends Flight {
 
     addStep(
         new GcpCloudSyncStep(
-            crl.getCloudResourceManagerCow(),
-            cloudSyncRoleMapping,
-            appContext.getFeatureConfiguration(),
-            appContext.getSamService(),
-            appContext.getGrantService(),
-            userRequest,
-            workspaceUuid),
+          notSamService,
+          workspaceUuid),
         bufferRetry);
 
     // Wait for the project permissions to propagate.

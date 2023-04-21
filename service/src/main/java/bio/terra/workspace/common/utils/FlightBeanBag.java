@@ -17,6 +17,8 @@ import bio.terra.workspace.service.datarepo.DataRepoService;
 import bio.terra.workspace.service.grant.GrantService;
 import bio.terra.workspace.service.iam.SamService;
 import bio.terra.workspace.service.logging.WorkspaceActivityLogService;
+import bio.terra.workspace.service.notsam.AclManager;
+import bio.terra.workspace.service.notsam.NotSamService;
 import bio.terra.workspace.service.petserviceaccount.PetSaService;
 import bio.terra.workspace.service.policy.TpsApiDispatch;
 import bio.terra.workspace.service.resource.controlled.ControlledResourceMetadataManager;
@@ -26,6 +28,7 @@ import bio.terra.workspace.service.resource.controlled.cloud.azure.storage.Stora
 import bio.terra.workspace.service.resource.controlled.flight.clone.bucket.BucketCloneRolesService;
 import bio.terra.workspace.service.resource.referenced.ReferencedResourceService;
 import bio.terra.workspace.service.spendprofile.SpendProfileService;
+import bio.terra.workspace.service.spice.SpiceService;
 import bio.terra.workspace.service.workspace.AwsCloudContextService;
 import bio.terra.workspace.service.workspace.AzureCloudContextService;
 import bio.terra.workspace.service.workspace.CloudSyncRoleMapping;
@@ -77,6 +80,9 @@ public class FlightBeanBag {
   private final LandingZoneApiDispatch landingZoneApiDispatch;
   private final WorkspaceActivityLogService workspaceActivityLogService;
   private final LandingZoneBatchAccountFinder landingZoneBatchAccountFinder;
+  private final SpiceService spiceService;
+  private final AclManager aclManager;
+  private final NotSamService notSamService;
 
   @Lazy
   @Autowired
@@ -112,7 +118,10 @@ public class FlightBeanBag {
       StorageAccountKeyProvider storageAccountKeyProvider,
       LandingZoneApiDispatch landingZoneApiDispatch,
       WorkspaceActivityLogService workspaceActivityLogService,
-      LandingZoneBatchAccountFinder landingZoneBatchAccountFinder) {
+      LandingZoneBatchAccountFinder landingZoneBatchAccountFinder,
+      SpiceService spiceService,
+      AclManager aclManager,
+      NotSamService notSamService) {
     this.applicationDao = applicationDao;
     this.gcpCloudContextService = gcpCloudContextService;
     this.azureCloudContextService = azureCloudContextService;
@@ -145,6 +154,9 @@ public class FlightBeanBag {
     this.landingZoneApiDispatch = landingZoneApiDispatch;
     this.workspaceActivityLogService = workspaceActivityLogService;
     this.landingZoneBatchAccountFinder = landingZoneBatchAccountFinder;
+    this.spiceService = spiceService;
+    this.aclManager = aclManager;
+    this.notSamService = notSamService;
   }
 
   public static FlightBeanBag getFromObject(Object object) {
@@ -277,5 +289,16 @@ public class FlightBeanBag {
 
   public WorkspaceActivityLogService getWorkspaceActivityLogService() {
     return workspaceActivityLogService;
+  }
+
+  public SpiceService getSpiceService() {
+    return spiceService;
+  }
+
+  public AclManager getAclManager() {
+    return aclManager;
+  }
+  public NotSamService getNotSamService() {
+    return notSamService;
   }
 }

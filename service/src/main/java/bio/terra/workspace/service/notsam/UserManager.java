@@ -76,5 +76,6 @@ public class UserManager {
     for (String userEmail : userConfiguration.getEmails()) {
       addUserAndProxyGroup(userEmail);
     }
+
   }
 }

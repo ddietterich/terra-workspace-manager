@@ -31,7 +31,7 @@ public class CreateDbGcpCloudContextFinishStep implements Step {
   @Override
   public StepResult doStep(FlightContext flightContext) throws InterruptedException {
     FlightUtils.validateRequiredEntries(
-        flightContext.getWorkingMap(), GCP_PROJECT_ID, IAM_GROUP_EMAIL_MAP);
+        flightContext.getWorkingMap(), GCP_PROJECT_ID);
 
     String projectId = flightContext.getWorkingMap().get(GCP_PROJECT_ID, String.class);
     Map<WsmIamRole, String> workspaceRoleGroupsMap =
@@ -40,12 +40,7 @@ public class CreateDbGcpCloudContextFinishStep implements Step {
             .get(WorkspaceFlightMapKeys.IAM_GROUP_EMAIL_MAP, new TypeReference<>() {});
 
     GcpCloudContext context =
-        new GcpCloudContext(
-            projectId,
-            workspaceRoleGroupsMap.get(WsmIamRole.OWNER),
-            workspaceRoleGroupsMap.get(WsmIamRole.WRITER),
-            workspaceRoleGroupsMap.get(WsmIamRole.READER),
-            workspaceRoleGroupsMap.get(WsmIamRole.APPLICATION));
+        new GcpCloudContext(projectId, null, null, null, null);
 
     gcpCloudContextService.createGcpCloudContextFinish(
         workspaceUuid, context, flightContext.getFlightId());

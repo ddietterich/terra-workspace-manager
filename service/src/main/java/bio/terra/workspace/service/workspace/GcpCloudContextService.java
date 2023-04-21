@@ -2,7 +2,6 @@ package bio.terra.workspace.service.workspace;
 
 import bio.terra.workspace.db.WorkspaceDao;
 import bio.terra.workspace.service.iam.AuthenticatedUserRequest;
-import bio.terra.workspace.service.iam.SamService;
 import bio.terra.workspace.service.workspace.exceptions.CloudContextRequiredException;
 import bio.terra.workspace.service.workspace.flight.gcp.CreateGcpContextFlightV2;
 import bio.terra.workspace.service.workspace.model.CloudPlatform;
@@ -22,12 +21,10 @@ import org.springframework.stereotype.Component;
 public class GcpCloudContextService {
 
   private final WorkspaceDao workspaceDao;
-  private final SamService samService;
 
   @Autowired
-  public GcpCloudContextService(WorkspaceDao workspaceDao, SamService samService) {
+  public GcpCloudContextService(WorkspaceDao workspaceDao) {
     this.workspaceDao = workspaceDao;
-    this.samService = samService;
   }
 
   /**
